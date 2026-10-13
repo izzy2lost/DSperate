@@ -47,7 +47,11 @@ void main() {
   uint polyalpha = (p.attr >> 16) & 0x1Fu;
   bool textured = (p.flags & DS_PF_TEXTURED) != 0u;
   // Texcoords truncate as the DS 12.4 >> 4 does; +0.01 absorbs float error.
-  uint src = shade_pixel(p, blendmode, polyalpha, textured, int(round(rgb.r)), int(round(rgb.g)), int(round(rgb.b)), int(floor(st.x + 0.01)), int(floor(st.y + 0.01)));
+  uint src;
+  if (textured && (pc.f.flags2 & DS_FF2_TEXFILTER) != 0u)
+    src = shade_texel(p, blendmode, polyalpha, true, int(round(rgb.r)), int(round(rgb.g)), int(round(rgb.b)), tex_rgba_filtered(p, st));
+  else
+    src = shade_pixel(p, blendmode, polyalpha, textured, int(round(rgb.r)), int(round(rgb.g)), int(round(rgb.b)), int(floor(st.x + 0.01)), int(floor(st.y + 0.01)));
   uint alpha = src >> 24;
 #ifndef DS_EARLY
   if (alpha <= pc.f.alpha_ref) discard;

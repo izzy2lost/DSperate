@@ -61,6 +61,10 @@ add_library(dsperate_core STATIC
   io/dsi_nwifi.cpp
 )
 target_include_directories(dsperate_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+# Android: the GPU raster hands its scaled picture over as an AHardwareBuffer.
+if(ANDROID)
+  target_link_libraries(dsperate_core PUBLIC android)
+endif()
 
 # The .symver in pow_compat.c only reaches the binary if this TU is kept out
 # of LTO; see the file's comment.

@@ -22,6 +22,7 @@ Spirv shader_lean_frag_opq();     // ... a translucent polygon's alpha-31 pixels
 Spirv shader_lean_frag_trans();   // ... its other pixels only (the translucent passes)
 Spirv shader_lean_resolve(); // ... and the resolve into the 3D layer record
 Spirv shader_lean_resolve_1x();   // ... the same over single-sample attachments (aa off)
+Spirv shader_lean_gather();       // ... the 1x record from the scaled picture (zero-copy hand-off)
 
 } // namespace ds::gpu::vk
 

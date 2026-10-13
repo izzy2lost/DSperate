@@ -128,6 +128,9 @@ public:
   Renderer3D::FrameRef frame_ref(bool allow_lag = true) const { return renderer_.frame_ref(allow_lag); }
   u64 last_raster_ns() const { return renderer_.last_band_sum_ns(); }
   const u32* line(const Renderer3D::FrameRef& f, u32 y);
+  // The 3D layer's horizontal scroll (BG0HOFS, 9 bits) line() applies: display
+  // column x shows the raster's column x + xpos (mod 512; 256-511 are blank).
+  u32 render_xpos() const { return render_xpos_; }
   // Finish async raster; needed before touching texture VRAM (raster workers may still read it).
   void sync_raster();
   void debug_dump(FILE* f) { renderer_.debug_dump(f); }

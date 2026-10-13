@@ -1,0 +1,14 @@
+#version 450
+// Above 1x with the zero-copy hand-off: the 3D layer record the compositor
+// and display capture read, built on the GPU from the scaled picture: each
+// DS pixel's top-left sample, the one evaluated at the pixel's own corner
+// (the DS's sampling point). The scaled picture itself stays on the GPU.
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(set = 0, binding = 0, r32ui) readonly uniform uimage2D hi;
+layout(std430, set = 0, binding = 1) writeonly buffer Record { uint px[]; };
+layout(push_constant) uniform PC { uint scale; } pc;
+void main() {
+  uvec2 p = gl_GlobalInvocationID.xy;
+  if (p.x >= 256u || p.y >= 192u) return;
+  px[p.y * 256u + p.x] = imageLoad(hi, ivec2(p * pc.scale)).r;
+}

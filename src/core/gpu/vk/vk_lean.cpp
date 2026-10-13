@@ -12,6 +12,7 @@ std::unique_ptr<Lean> Lean::create(Device&, bool, u32, std::string* why) { if (w
 bool Lean::msaa() const { return false; }
 u32 Lean::scale() const { return 1; }
 const u32* Lean::hires_of(const u32*) const { return nullptr; }
+void* Lean::hires_buffer_of(const u32*) const { return nullptr; }
 GpuPoly* Lean::poly_buffer() { return nullptr; }
 GpuVert* Lean::vert_buffer() { return nullptr; }
 u32* Lean::texel_buffer(u32* cap) { if (cap) *cap = 0; return nullptr; }
@@ -30,6 +31,10 @@ Lean::Stats Lean::stats(bool) { return {}; }
 
 #include "core/gpu/vk/vk_internal.h"
 #include "core/gpu/vk/vk_shaders.h"
+#if defined(VK_ANDROID_external_memory_android_hardware_buffer)
+#include <android/hardware_buffer.h>
+#define DS_LEAN_AHB 1
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -66,6 +71,19 @@ struct Lean::Impl {
   // Above 1x, out[] holds the scaled picture and native[] the record built
   // from it (its top-left sample per DS pixel) when the slot finishes.
   std::vector<u32> native[4];
+  // Zero-copy (Android, above 1x): the scaled picture is copied GPU-side into
+  // an AHardwareBuffer per slot, and the 1x record gathered from it by a
+  // compute pass, so the CPU never touches the scaled picture.
+  bool zero_copy = false;
+  void* ahb[4] = {};                       // AHardwareBuffer*
+  VkImage ahb_img[4] = {};
+  VkDeviceMemory ahb_mem[4] = {};
+  VkShaderModule mod_gather = VK_NULL_HANDLE;
+  VkDescriptorSetLayout dsl_gather = VK_NULL_HANDLE;
+  VkPipelineLayout pl_gather = VK_NULL_HANDLE;
+  VkPipeline pipe_gather = VK_NULL_HANDLE;
+  VkDescriptorPool pool_gather = VK_NULL_HANDLE;
+  VkDescriptorSet set_gather[4] = {};
   double tick_ns = 0;
   VkFormat ds_format = VK_FORMAT_D24_UNORM_S8_UINT;
 
@@ -109,12 +127,71 @@ struct Lean::Impl {
   u32 last_draws = 0;
   Lean::Stats st;
 
+  void destroy_ahb() {
+    for (u32 i = 0; i < 4; ++i) {
+      if (ahb_img[i]) api->vkDestroyImage(vk->dev, ahb_img[i], nullptr);
+      if (ahb_mem[i]) api->vkFreeMemory(vk->dev, ahb_mem[i], nullptr);
+      ahb_img[i] = VK_NULL_HANDLE; ahb_mem[i] = VK_NULL_HANDLE;
+#if DS_LEAN_AHB
+      if (ahb[i]) AHardwareBuffer_release(static_cast<AHardwareBuffer*>(ahb[i]));
+#endif
+      ahb[i] = nullptr;
+    }
+  }
+
+  // One AHardwareBuffer per slot, each bound to an image the scaled picture is
+  // copied into. False (with everything undone) where the driver refuses any of it.
+  bool make_ahb(u32 sw, u32 sh) {
+#if DS_LEAN_AHB
+    const Api& a = *api;
+    auto props_fn = reinterpret_cast<PFN_vkGetAndroidHardwareBufferPropertiesANDROID>(vk->get_ahb_properties);
+    if (!props_fn) return false;
+    VkPhysicalDeviceMemoryProperties mp{}; a.vkGetPhysicalDeviceMemoryProperties(vk->phys, &mp);
+    for (u32 i = 0; i < 4; ++i) {
+      AHardwareBuffer_Desc desc{};
+      desc.width = sw; desc.height = sh; desc.layers = 1;
+      desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+      desc.usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT;
+      AHardwareBuffer* hb = nullptr;
+      if (AHardwareBuffer_allocate(&desc, &hb) != 0 || !hb) { destroy_ahb(); return false; }
+      ahb[i] = hb;
+      VkAndroidHardwareBufferFormatPropertiesANDROID fp{}; fp.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID;
+      VkAndroidHardwareBufferPropertiesANDROID hp{}; hp.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID; hp.pNext = &fp;
+      if (props_fn(vk->dev, hb, &hp) != VK_SUCCESS || !hp.memoryTypeBits) { destroy_ahb(); return false; }
+      VkExternalMemoryImageCreateInfo ext{}; ext.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+      ext.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+      VkImageCreateInfo ii{}; ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; ii.pNext = &ext; ii.imageType = VK_IMAGE_TYPE_2D;
+      ii.format = VK_FORMAT_R8G8B8A8_UNORM; ii.extent = {sw, sh, 1}; ii.mipLevels = 1; ii.arrayLayers = 1; ii.samples = VK_SAMPLE_COUNT_1_BIT;
+      ii.tiling = VK_IMAGE_TILING_OPTIMAL; ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+      ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      if (a.vkCreateImage(vk->dev, &ii, nullptr, &ahb_img[i]) != VK_SUCCESS) { ahb_img[i] = VK_NULL_HANDLE; destroy_ahb(); return false; }
+      VkImportAndroidHardwareBufferInfoANDROID imp{}; imp.sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID; imp.buffer = hb;
+      VkMemoryDedicatedAllocateInfo ded{}; ded.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO; ded.pNext = &imp; ded.image = ahb_img[i];
+      VkMemoryAllocateInfo ai{}; ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; ai.pNext = &ded; ai.allocationSize = hp.allocationSize;
+      ai.memoryTypeIndex = 0;
+      while (ai.memoryTypeIndex < mp.memoryTypeCount && !(hp.memoryTypeBits & (1u << ai.memoryTypeIndex))) ++ai.memoryTypeIndex;
+      if (a.vkAllocateMemory(vk->dev, &ai, nullptr, &ahb_mem[i]) != VK_SUCCESS) { ahb_mem[i] = VK_NULL_HANDLE; destroy_ahb(); return false; }
+      if (a.vkBindImageMemory(vk->dev, ahb_img[i], ahb_mem[i], 0) != VK_SUCCESS) { destroy_ahb(); return false; }
+    }
+    return true;
+#else
+    (void)sw; (void)sh;
+    return false;
+#endif
+  }
+
   void destroy() {
     if (!vk) return;
     const Api& a = *api;
     for (u32 i = 0; i < kSlots; ++i) if (fence_live[i]) { a.vkWaitForFences(vk->dev, 1, &fence[i], VK_TRUE, ~0ull); fence_live[i] = false; }
     for (auto& wb : pipe) for (auto& row : wb) for (auto& p : row) if (p) a.vkDestroyPipeline(vk->dev, p, nullptr);
     if (pipe_resolve) a.vkDestroyPipeline(vk->dev, pipe_resolve, nullptr);
+    if (pipe_gather) a.vkDestroyPipeline(vk->dev, pipe_gather, nullptr);
+    if (pl_gather) a.vkDestroyPipelineLayout(vk->dev, pl_gather, nullptr);
+    if (dsl_gather) a.vkDestroyDescriptorSetLayout(vk->dev, dsl_gather, nullptr);
+    if (pool_gather) a.vkDestroyDescriptorPool(vk->dev, pool_gather, nullptr);
+    if (mod_gather) a.vkDestroyShaderModule(vk->dev, mod_gather, nullptr);
+    destroy_ahb();
     if (fb) a.vkDestroyFramebuffer(vk->dev, fb, nullptr);
     if (rp) a.vkDestroyRenderPass(vk->dev, rp, nullptr);
     if (ds_depth_view) a.vkDestroyImageView(vk->dev, ds_depth_view, nullptr);
@@ -140,8 +217,13 @@ struct Lean::Impl {
 Lean::~Lean() { if (d_) d_->destroy(); }
 bool Lean::msaa() const { return d_->msaa; }
 u32 Lean::scale() const { return d_->scale; }
+void* Lean::hires_buffer_of(const u32* record) const {
+  if (!d_->zero_copy || !record) return nullptr;
+  for (u32 i = 0; i < Impl::kSlots; ++i) if (record == d_->out[i].ptr) return d_->ahb[i];
+  return nullptr;
+}
 const u32* Lean::hires_of(const u32* record) const {
-  if (d_->scale == 1 || !record) return nullptr;
+  if (d_->scale == 1 || d_->zero_copy || !record) return nullptr;
   for (u32 i = 0; i < Impl::kSlots; ++i) if (record == d_->native[i].data()) return static_cast<const u32*>(d_->out[i].ptr);
   return nullptr;
 }
@@ -168,6 +250,8 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, u32 scale, std::strin
   d.vk = vk; d.api = &a; d.dev = &dev;
   d.scale = std::clamp<u32>(scale, 1, 8);
   const u32 SW = W * d.scale, SH = H * d.scale;   // the drawn picture's size
+  // DS_LEAN_ZEROCOPY=0 keeps the host copy (debug).
+  d.zero_copy = d.scale > 1 && dev.limits().ahb_import && !(std::getenv("DS_LEAN_ZEROCOPY") && std::atoi(std::getenv("DS_LEAN_ZEROCOPY")) == 0) && d.make_ahb(SW, SH);
   auto fail = [&](const char* m) { if (why) *why = m; return nullptr; };
   d.msaa = msaa && dev.limits().msaa4 && !(std::getenv("DS_LEAN_MSAA") && std::atoi(std::getenv("DS_LEAN_MSAA")) == 0);   // DS_LEAN_MSAA=0: off regardless (debug)
   const VkSampleCountFlagBits samples = d.msaa ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT;
@@ -181,8 +265,8 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, u32 scale, std::strin
     d.polys[i] = dev.alloc(sizeof(GpuPoly) * DS_MAX_POLYS, Access::CpuWrite);
     d.verts[i] = dev.alloc(sizeof(GpuVert) * DS_MAX_VERTS, Access::CpuWrite);
     d.post[i] = dev.alloc(sizeof(GpuPost), Access::CpuWrite);
-    d.out[i] = dev.alloc(sizeof(u32) * SW * SH, Access::CpuRead);
-    if (d.scale > 1) d.native[i].assign(W * H, 0);
+    d.out[i] = dev.alloc(sizeof(u32) * (d.zero_copy ? W * H : SW * SH), Access::CpuRead);
+    if (d.scale > 1 && !d.zero_copy) d.native[i].assign(W * H, 0);
     if (!d.polys[i] || !d.verts[i] || !d.post[i] || !d.out[i]) return fail("buffer allocation");
   }
   {
@@ -276,7 +360,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, u32 scale, std::strin
     if (a.vkCreateImageView(vk->dev, &vi, nullptr, &d.ds_depth_view) != VK_SUCCESS) return fail("depth input view");
   }
   if (!make_image(VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | transient, VK_IMAGE_ASPECT_COLOR_BIT, d.fog_ms, samples)) return fail("MSAA fog attachment");
-  if (!make_image(VK_FORMAT_R32_UINT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT, d.res, VK_SAMPLE_COUNT_1_BIT)) return fail("resolve attachment");
+  if (!make_image(VK_FORMAT_R32_UINT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | (d.zero_copy ? VK_IMAGE_USAGE_STORAGE_BIT : 0u), VK_IMAGE_ASPECT_COLOR_BIT, d.res, VK_SAMPLE_COUNT_1_BIT)) return fail("resolve attachment");
   {
     VkDescriptorImageInfo di[3]{};
     di[0].imageView = d.col_ms.view; di[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -398,6 +482,39 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, u32 scale, std::strin
     if (a.vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &gpi, nullptr, &d.pipe_resolve) != VK_SUCCESS) return fail("resolve pipeline");
   }
 
+  // The zero-copy gather: the 1x record from the scaled picture (lean_gather.comp).
+  if (d.zero_copy) {
+    VkShaderModuleCreateInfo ci{}; ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    const Spirv g = shader_lean_gather(); ci.codeSize = g.bytes; ci.pCode = g.code;
+    if (a.vkCreateShaderModule(vk->dev, &ci, nullptr, &d.mod_gather) != VK_SUCCESS) return fail("gather shader");
+    VkDescriptorSetLayoutBinding b[2]{};
+    b[0].binding = 0; b[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; b[0].descriptorCount = 1; b[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    b[1].binding = 1; b[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; b[1].descriptorCount = 1; b[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutCreateInfo li{}; li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; li.bindingCount = 2; li.pBindings = b;
+    if (a.vkCreateDescriptorSetLayout(vk->dev, &li, nullptr, &d.dsl_gather) != VK_SUCCESS) return fail("gather layout");
+    VkPushConstantRange pr{}; pr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT; pr.size = sizeof(u32);
+    VkPipelineLayoutCreateInfo pli{}; pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pli.setLayoutCount = 1; pli.pSetLayouts = &d.dsl_gather; pli.pushConstantRangeCount = 1; pli.pPushConstantRanges = &pr;
+    if (a.vkCreatePipelineLayout(vk->dev, &pli, nullptr, &d.pl_gather) != VK_SUCCESS) return fail("gather pipeline layout");
+    VkComputePipelineCreateInfo cpi{}; cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO; cpi.layout = d.pl_gather;
+    cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT; cpi.stage.module = d.mod_gather; cpi.stage.pName = "main";
+    if (a.vkCreateComputePipelines(vk->dev, VK_NULL_HANDLE, 1, &cpi, nullptr, &d.pipe_gather) != VK_SUCCESS) return fail("gather pipeline");
+    VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, Impl::kSlots}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Impl::kSlots}};
+    VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpi.maxSets = Impl::kSlots; dpi.poolSizeCount = 2; dpi.pPoolSizes = ps;
+    if (a.vkCreateDescriptorPool(vk->dev, &dpi, nullptr, &d.pool_gather) != VK_SUCCESS) return fail("gather descriptor pool");
+    VkDescriptorSetLayout ls[Impl::kSlots]; for (u32 i = 0; i < Impl::kSlots; ++i) ls[i] = d.dsl_gather;
+    VkDescriptorSetAllocateInfo dsa{}; dsa.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; dsa.descriptorPool = d.pool_gather; dsa.descriptorSetCount = Impl::kSlots; dsa.pSetLayouts = ls;
+    if (a.vkAllocateDescriptorSets(vk->dev, &dsa, d.set_gather) != VK_SUCCESS) return fail("gather descriptor sets");
+    for (u32 i = 0; i < Impl::kSlots; ++i) {
+      VkDescriptorImageInfo di{}; di.imageView = d.res.view; di.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+      VkDescriptorBufferInfo bi{}; bi.buffer = vk_buf(d.out[i]); bi.range = VK_WHOLE_SIZE;
+      VkWriteDescriptorSet w[2]{};
+      w[0].sType = w[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[0].dstSet = w[1].dstSet = d.set_gather[i];
+      w[0].dstBinding = 0; w[0].descriptorCount = 1; w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; w[0].pImageInfo = &di;
+      w[1].dstBinding = 1; w[1].descriptorCount = 1; w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[1].pBufferInfo = &bi;
+      a.vkUpdateDescriptorSets(vk->dev, 2, w, 0, nullptr);
+    }
+  }
+
   // Commands, fence, timestamps.
   {
     VkCommandPoolCreateInfo cpi{}; cpi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO; cpi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; cpi.queueFamilyIndex = vk->qfam;
@@ -414,7 +531,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, u32 scale, std::strin
     }
   }
   self->ready_ = true;
-  std::fprintf(stderr, "gpu lean: %ux%s, %s depth/stencil\n", d.scale, d.msaa ? " with 4x MSAA" : " (no MSAA)", d.ds_format == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8");
+  std::fprintf(stderr, "gpu lean: %ux%s, %s depth/stencil%s\n", d.scale, d.msaa ? " with 4x MSAA" : " (no MSAA)", d.ds_format == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8", d.zero_copy ? ", zero-copy hand-off" : "");
   return self;
 }
 
@@ -489,6 +606,10 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     cv[1].depthStencil.stencil = ca ? (S_DRAWN | code[(f.clear_attr >> 24) & 0x3F]) : 0;
     cv[3].color.float32[0] = (f.clear_attr & 0x8000) ? 1.f : 0.f;   // the rear plane's fog bit
   }
+  // The previous frame's copy and gather read `res`, which this render pass
+  // rewrites: they must be done first (the render pass's implicit external
+  // dependency only starts at the top of the pipe).
+  a.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 0, nullptr);
   VkRenderPassBeginInfo rbi{}; rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; rbi.renderPass = d.rp; rbi.framebuffer = d.fb; rbi.renderArea = {{0, 0}, {SW, SH}}; rbi.clearValueCount = 4; rbi.pClearValues = cv;
   a.vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
   a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout, 0, 1, &d.set[slot], 0, nullptr);
@@ -576,11 +697,39 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout, 1, 1, &d.set_in, 0, nullptr);
   a.vkCmdDraw(cb, 3, 1, 0, 0);
   a.vkCmdEndRenderPass(cb);
-  // The record to the CPU-readable buffer.
-  VkBufferImageCopy rg{}; rg.bufferRowLength = SW; rg.bufferImageHeight = SH; rg.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}; rg.imageExtent = {SW, SH, 1};
-  a.vkCmdCopyImageToBuffer(cb, d.res.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk_buf(d.out[slot]), 1, &rg);
-  VkMemoryBarrier mb{}; mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER; mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-  a.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+  if (d.zero_copy) {
+    // The scaled picture into this slot's AHardwareBuffer, word for word (R32 and RGBA8 are size-compatible).
+    const VkImageSubresourceRange all{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier to_dst{}; to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER; to_dst.image = d.ahb_img[slot]; to_dst.subresourceRange = all;
+    to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    to_dst.srcQueueFamilyIndex = to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    a.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to_dst);
+    VkImageCopy ic{}; ic.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}; ic.dstSubresource = ic.srcSubresource; ic.extent = {SW, SH, 1};
+    a.vkCmdCopyImage(cb, d.res.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, d.ahb_img[slot], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ic);
+    VkImageMemoryBarrier after[2]{};
+    after[0].sType = after[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    after[0].image = d.ahb_img[slot]; after[0].subresourceRange = all;   // done: readable by whoever samples the buffer
+    after[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; after[0].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    after[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; after[0].dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+    after[1].image = d.res.img; after[1].subresourceRange = all;          // the gather reads it as a storage image
+    after[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; after[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    after[1].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT; after[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    for (auto& b : after) b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    a.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 2, after);
+    a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, d.pipe_gather);
+    a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, d.pl_gather, 0, 1, &d.set_gather[slot], 0, nullptr);
+    const u32 sc = d.scale;
+    a.vkCmdPushConstants(cb, d.pl_gather, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof sc, &sc);
+    a.vkCmdDispatch(cb, W / 16, H / 16, 1);
+    VkMemoryBarrier mb{}; mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER; mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    a.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+  } else {
+    // The record to the CPU-readable buffer.
+    VkBufferImageCopy rg{}; rg.bufferRowLength = SW; rg.bufferImageHeight = SH; rg.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}; rg.imageExtent = {SW, SH, 1};
+    a.vkCmdCopyImageToBuffer(cb, d.res.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk_buf(d.out[slot]), 1, &rg);
+    VkMemoryBarrier mb{}; mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER; mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    a.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+  }
   if (d.timing) a.vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, d.qpool, 2 * slot + 1);
   if (a.vkEndCommandBuffer(cb) != VK_SUCCESS) return false;
   const double t_q = now_ms();
@@ -604,8 +753,8 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
 static void finish_slot(Lean::Impl& d, u32 slot) {
   const Api& a = *d.api;
   d.fence_live[slot] = false;
-  d.dev->invalidate(d.out[slot], 0, sizeof(u32) * W * H * d.scale * d.scale);
-  if (d.scale > 1) {
+  d.dev->invalidate(d.out[slot], 0, sizeof(u32) * W * H * (d.zero_copy ? 1 : d.scale * d.scale));
+  if (d.scale > 1 && !d.zero_copy) {
     // The record: each DS pixel's top-left sample, the one evaluated at the
     // pixel's own corner (the DS's sampling point), so the compositor and
     // capture see what a 1x raster would have drawn there.
@@ -649,7 +798,7 @@ const u32* Lean::newest_ready(bool allow_lag) {
   const u32 newest = static_cast<u32>((d.gen - 1) % Impl::kSlots);
   if (d.asked_gen != d.gen) { d.asked_gen = d.gen; d.st.gap_ms += now_ms() - d.submit_at[newest]; ++d.st.gap_n; }
   if (d.fence_live[newest] && a.vkGetFenceStatus(d.vk->dev, d.fence[newest]) == VK_SUCCESS) finish_slot(d, newest);
-  auto record = [&](u32 slot) { return d.scale > 1 ? d.native[slot].data() : static_cast<const u32*>(d.out[slot].ptr); };
+  auto record = [&](u32 slot) { return d.scale > 1 && !d.zero_copy ? d.native[slot].data() : static_cast<const u32*>(d.out[slot].ptr); };
   if (!d.fence_live[newest]) { ++d.st.newest; return record(newest); }
   if (allow_lag && d.gen >= 2) {
     const u32 prev = static_cast<u32>((d.gen - 2) % Impl::kSlots);

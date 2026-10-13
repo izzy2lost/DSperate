@@ -61,6 +61,11 @@ public:
   // pointer output()/newest_ready() returned), same word layout, 256*scale
   // wide; null at scale 1 or for a record this raster did not hand out.
   const u32* hires_of(const u32* record) const;
+  // The same picture as an AHardwareBuffer (Android, VK_ANDROID_external_
+  // memory_android_hardware_buffer): R8G8B8A8 holding the record's words
+  // byte for byte, for a frontend to sample in place. hires_of() is null when
+  // this is not. Valid until the raster is destroyed; acquire to keep it longer.
+  void* hires_buffer_of(const u32* record) const;
 
   // GPU time of the last waited frame in ns (DS_VK_TIMING=1 and timestamps), else 0.
   u64 gpu_ns() const;

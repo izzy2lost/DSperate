@@ -104,6 +104,9 @@ public:
     bool msaa4 = false;
     // The present extensions (set_present_extensions) and VK_KHR_swapchain are enabled.
     bool present = false;
+    // Android: VK_ANDROID_external_memory_android_hardware_buffer is enabled,
+    // so images can be bound to AHardwareBuffers another API samples.
+    bool ahb_import = false;
   };
   const Limits& limits() const { return limits_; }
 

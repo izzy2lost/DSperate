@@ -2983,7 +2983,9 @@ void Renderer3D::gpu_rebuild() {
   gpu_resident_.clear(); gpu_arena_top_ = 0;
 }
 
+void gpu_trace_refresh();
 bool Renderer3D::set_gpu(bool on, std::string* why) {
+  if (on) gpu_trace_refresh();
   if (!on) { sync_all(); gpu_job_wait(); if (lean_) lean_->wait(); gpu_on_ = false; return true; }
   if (gpu_on_) return true;
   std::string reason;
@@ -3017,6 +3019,10 @@ struct GpuTrace {
   }
 };
 GpuTrace g_gpu_trace;
+}
+// The trace switch, read again when the GPU raster starts (a frontend may set it after load).
+void gpu_trace_refresh() { g_gpu_trace.on = std::getenv("DS_GPU_TRACE") && std::atoi(std::getenv("DS_GPU_TRACE")) != 0; }
+namespace {
 inline double now_ms() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 }
 
@@ -3085,6 +3091,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
   GpuFrame f{};
   f.npoly = np; f.scale = 1; f.dispcnt = dispcnt_; f.alpha_ref = rs_->alpha_ref;
   f.first_ordered = first_ordered; f.opaque_rows = opaque_rows; f.nrows = nrows;
+  if (gpu_tex_filter_) f.flags2 |= DS_FF2_TEXFILTER;
   for (u32 i = 0; i < npoly; ++i) if (!polys[i]->degenerate) { if (polys[i]->wbuffer) f.flags |= DS_FF_WBUFFER; break; }
   {
     const u16 c = static_cast<u16>(rs_->clear_attr1);
@@ -3117,7 +3124,8 @@ void Renderer3D::sync_line(const FrameRef& f, s32 y) {
       gpu_job_wait();
       f.out = lean_ ? lean_->newest_ready(f.allow_lag) : nullptr;
       f.hi = f.out ? lean_->hires_of(f.out) : nullptr;
-      f.hi_scale = f.hi ? lean_->scale() : 1;
+      f.hi_buffer = f.out ? lean_->hires_buffer_of(f.out) : nullptr;
+      f.hi_scale = (f.hi || f.hi_buffer) ? lean_->scale() : 1;
       if (!f.out) f.out = out_[display_].data();   // a Lean with no frame yet: a stale picture, not a null read
       if (g_gpu_trace.on) { const double w = now_ms() - t0; g_gpu_trace.wait_ms += w; g_gpu_trace.wait_max = std::max(g_gpu_trace.wait_max, w); if (w > 0.2) ++g_gpu_trace.waited; }
     }

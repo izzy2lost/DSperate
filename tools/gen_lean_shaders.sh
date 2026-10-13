@@ -48,4 +48,5 @@ build lean.frag         lean_frag_opq.spv        -DDS_ALPHA_SEL=1
 build lean.frag         lean_frag_trans.spv      -DDS_ALPHA_SEL=2
 build lean_resolve.frag lean_resolve_frag.spv
 build lean_resolve.frag lean_resolve_1x_frag.spv -DDS_SAMPLES=1
+build lean_gather.comp  lean_gather_comp.spv
 echo "gen_lean_shaders: done -- commit the .spv files that changed"

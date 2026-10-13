@@ -100,10 +100,15 @@ public:
   // (costs a full layer select on engine A's 3D lines).
   struct Hires {
     const u32* layer3d = nullptr;   // the frame's 3D layer at `scale` x (256*scale wide), or null
+    // ... or, handed over without a copy, the same words in an AHardwareBuffer
+    // (R8G8B8A8, Android); valid while the raster lives, acquire to keep it.
+    const void* layer3d_buffer = nullptr;
     u32 scale = 1;
     std::vector<u32> desc, operand; // 192 x 256 each
     // Per line: bit 0 the line shows the composite with 3D in it, bit 1 the
-    // screen engine A was on (POWCNT1 bit 15), bits 16-31 MASTER_BRIGHT.
+    // screen engine A was on (POWCNT1 bit 15), bits 2-10 the 3D layer's
+    // horizontal scroll (Gpu3D::render_xpos: display column x is layer3d's
+    // column x + scroll, mod 512, blank past 255), bits 16-31 MASTER_BRIGHT.
     std::array<u32, SCREEN_H> line{};
   };
   void set_hires(bool on);

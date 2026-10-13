@@ -30,10 +30,44 @@ uint c15_to_18(uint c, uint shift) {
   return v != 0u ? v + 1u : v;
 }
 
+// The texel at (s, t) as 6-bit RGB and 5-bit alpha.
+uvec4 tex_rgba(GpuPoly p, int s, int t) {
+  uint packed = sample_tex(p, s, t);
+  uint c = packed & 0xFFFFu;
+  return uvec4(c15_to_18(c, 0u), c15_to_18(c, 4u), c15_to_18(c, 9u), (packed >> 16) & 0x1Fu);
+}
+
+// Bilinear filtering over the four texels around (s, t), 12.4 coordinates,
+// each fetched through the DS's own wrap/flip/clamp. Colour is weighted by
+// alpha (a transparent texel's colour is not its picture), then rounded back
+// to the DS's precision for the combine. An enhancement, not the hardware.
+uvec4 tex_rgba_filtered(GpuPoly p, vec2 st) {
+  vec2 u = st / 16.0 - 0.5;
+  vec2 b = floor(u), f = u - b;
+  int s0 = int(b.x) * 16, t0 = int(b.y) * 16;
+  vec4 c00 = vec4(tex_rgba(p, s0, t0)), c10 = vec4(tex_rgba(p, s0 + 16, t0));
+  vec4 c01 = vec4(tex_rgba(p, s0, t0 + 16)), c11 = vec4(tex_rgba(p, s0 + 16, t0 + 16));
+  vec4 w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
+  vec4 wa = w * vec4(c00.a, c10.a, c01.a, c11.a);
+  float asum = wa.x + wa.y + wa.z + wa.w;
+  float a = dot(w, vec4(c00.a, c10.a, c01.a, c11.a));
+  vec3 rgb = asum > 0.0 ? (c00.rgb * wa.x + c10.rgb * wa.y + c01.rgb * wa.z + c11.rgb * wa.w) / asum : c00.rgb;
+  return uvec4(uvec3(clamp(round(rgb), 0.0, 63.0)), uint(clamp(round(a), 0.0, 31.0)));
+}
+
 // ---- the pixel -------------------------------------------------------------
+
+uint shade_texel(GpuPoly p, uint blendmode, uint polyalpha, bool textured,
+                 int vr9, int vg9, int vb9, uvec4 texel);
 
 uint shade_pixel(GpuPoly p, uint blendmode, uint polyalpha, bool textured,
                  int vr9, int vg9, int vb9, int s, int t) {
+  return shade_texel(p, blendmode, polyalpha, textured, vr9, vg9, vb9, textured ? tex_rgba(p, s, t) : uvec4(0u));
+}
+
+// shade_pixel with the texel already fetched (6-bit RGB, 5-bit alpha).
+uint shade_texel(GpuPoly p, uint blendmode, uint polyalpha, bool textured,
+                 int vr9, int vg9, int vb9, uvec4 texel) {
   uint vr = uint(vr9 >> 3) & 0x3Fu, vg = uint(vg9 >> 3) & 0x3Fu, vb = uint(vb9 >> 3) & 0x3Fu;
   uint r, g, b, a;
   // Mode 2 = toon or highlight (DISP3DCNT bit 1). Toon replaces vertex colour
@@ -48,9 +82,7 @@ uint shade_pixel(GpuPoly p, uint blendmode, uint polyalpha, bool textured,
     }
   }
   if (textured) {
-    uint packed = sample_tex(p, s, t);
-    uint tcol = packed & 0xFFFFu, ta = (packed >> 16) & 0x1Fu;
-    uint tr = c15_to_18(tcol, 0u), tg = c15_to_18(tcol, 4u), tb = c15_to_18(tcol, 9u);
+    uint tr = texel.r, tg = texel.g, tb = texel.b, ta = texel.a;
     if ((blendmode & 1u) != 0u) {          // decal
       if (ta == 0u)       { r = vr; g = vg; b = vb; }
       else if (ta == 31u) { r = tr; g = tg; b = tb; }

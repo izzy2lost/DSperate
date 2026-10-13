@@ -207,6 +207,9 @@ std::unique_ptr<Device> Device::create(std::string* why) {
     if (!std::strcmp(e.extensionName, VK_EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME)) has_roaa = true;
     if (!std::strcmp(e.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) has_swapchain = true;
     if (!std::strcmp(e.extensionName, VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME)) has_gprio = true;
+#if defined(VK_ANDROID_external_memory_android_hardware_buffer)
+    if (!std::strcmp(e.extensionName, VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME)) self->limits_.ahb_import = props.apiVersion >= VK_API_VERSION_1_1;
+#endif
   }
   self->limits_.present = !inst_exts.empty() && has_swapchain;
   self->limits_.dmabuf_import = has_fd && has_dmabuf;
@@ -251,7 +254,10 @@ std::unique_ptr<Device> Device::create(std::string* why) {
   if (self->limits_.int64_atomics && has_atomic64_ext) want.push_back(VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME);
   if (self->limits_.dmabuf_import) { want.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME); want.push_back(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME); }
   if (self->limits_.drm_modifier) { want.push_back(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME); want.push_back(VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME); }
-  if (self->limits_.dmabuf_import && has_foreign) want.push_back(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);
+  if ((self->limits_.dmabuf_import || self->limits_.ahb_import) && has_foreign) want.push_back(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);
+#if defined(VK_ANDROID_external_memory_android_hardware_buffer)
+  if (self->limits_.ahb_import) want.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+#endif
   if (self->limits_.ordered_attachments) want.push_back(VK_EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME);
   if (self->limits_.present) want.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
   VkPhysicalDeviceShaderAtomicInt64Features en64{};
@@ -317,6 +323,12 @@ std::unique_ptr<Device> Device::create(std::string* why) {
   d.internal.queue2 = d.queue2;
   d.internal.phys = d.phys;
   d.internal.qfam = d.qfam;
+#if defined(VK_ANDROID_external_memory_android_hardware_buffer)
+  if (self->limits_.ahb_import) {
+    d.internal.get_ahb_properties = gipa(d.inst, "vkGetAndroidHardwareBufferPropertiesANDROID");
+    if (!d.internal.get_ahb_properties) self->limits_.ahb_import = false;
+  }
+#endif
   return self;
 }
 

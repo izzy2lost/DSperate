@@ -129,6 +129,7 @@ struct GpuFrame {
 // record to the edge plane instead of blending; present stage splits it.
 #define DS_FF2_SMOOTH  0x1u
 #define DS_FF2_MSAA    0x2u   // 4x MSAA: vertices on pixel corners, so coverage is the polygon's true area
+#define DS_FF2_TEXFILTER 0x4u // lean raster: bilinear texture filtering (an enhancement; the DS samples the nearest texel)
 
 // Render state too large for push constants (fog table, edge colours, toon
 // table). Uploaded every frame, 320 bytes, cheaper than tracking changes.

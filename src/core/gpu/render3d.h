@@ -83,6 +83,9 @@ public:
   // Takes effect at the next frame, like the AA setting. Coordinator only.
   void set_gpu_scale(u32 scale) { gpu_scale_ = scale < 1 ? 1 : scale > 8 ? 8 : scale; }
   u32 gpu_scale() const { return gpu_scale_; }
+  // Bilinear texture filtering on the GPU raster (an enhancement; the DS
+  // samples the nearest texel). Takes effect at the next frame.
+  void set_gpu_tex_filter(bool on) { gpu_tex_filter_ = on; }
 private:
   NDS& nds_;
   // Holds a whole chunk of scanlines at once (render_chunk draws chunk at a
@@ -377,6 +380,7 @@ public:
     // The same frame drawn at `hi_scale` x (a GPU raster above 1x), picked
     // with `out`; null when the frame has no such picture (1x, CPU-drawn).
     mutable const u32* hi = nullptr;
+    mutable const void* hi_buffer = nullptr;   // or the same picture as an AHardwareBuffer (vk::Lean::hires_buffer_of)
     mutable u32 hi_scale = 1;
     bool gpu = false, allow_lag = true;
     u64 gen = 0;
@@ -414,6 +418,7 @@ private:
   std::unique_ptr<vk::Lean> lean_retired_;   // the Lean gpu_rebuild() replaced, kept one frame for readers of its record
   bool lean_aa_ = false;   // the AA setting lean_ was created for (msaa() is what the device granted)
   u32 gpu_scale_ = 1;      // the internal resolution asked for; lean_->scale() is the one it has
+  bool gpu_tex_filter_ = false;
   void gpu_rebuild();
   // The GPU submit (command recording + queue call, ~0.9 ms) runs on its own
   // thread, off the emulation thread: gpu_submit() fills the staging buffers

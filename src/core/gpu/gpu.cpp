@@ -483,7 +483,7 @@ void Gpu::on_scanline_start() {
     // All display lines must be drawn before the frontend reads them and before begin_frame runs.
     { prof::Scope j(prof::JOIN0); join_worker(JoinSite::Line0); }
     // The finished frame's scaled 3D picture, before begin_frame takes the next frame's ref.
-    if (hires_on_) { hires_.layer3d = ref3d_.hi; hires_.scale = ref3d_.hi ? ref3d_.hi_scale : 1; }
+    if (hires_on_) { hires_.layer3d = ref3d_.hi; hires_.layer3d_buffer = ref3d_.hi_buffer; hires_.scale = (ref3d_.hi || ref3d_.hi_buffer) ? ref3d_.hi_scale : 1; }
     if (probe_enabled_) async_probe_check(true);
     { prof::Scope b(prof::BEGIN_FRAME); begin_frame(); }
     nds_.frame_ready = true;
@@ -812,7 +812,8 @@ void Gpu::output_engine(int e, u32 line) {
   const int screen = en.screen();
   if (e == 0 && hires_on_) {
     const bool composite = screens_on_ && ((en.dispcnt() >> 16) & 3) == 1;
-    hires_.line[line] = (composite && en.hires_line_has_3d() ? 1u : 0u) | (screen ? 2u : 0u) | (static_cast<u32>(en.master_bright()) << 16);
+    hires_.line[line] = (composite && en.hires_line_has_3d() ? 1u : 0u) | (screen ? 2u : 0u) | ((nds_.gpu3d.render_xpos() & 0x1FF) << 2) |
+                        (static_cast<u32>(en.master_bright()) << 16);
   }
   const bool scaled = scaling();
   u32* dst = scaled ? line_out_[e].data() : fb_[screen].data() + line * SCREEN_W;

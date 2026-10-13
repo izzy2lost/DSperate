@@ -6,6 +6,9 @@
 // vulkan.h. All functions resolved through vkGetInstanceProcAddr, so nothing
 // links against libvulkan and a driverless machine is not a failure to start.
 #define VK_NO_PROTOTYPES
+#if defined(__ANDROID__) && !defined(VK_USE_PLATFORM_ANDROID_KHR)
+#define VK_USE_PLATFORM_ANDROID_KHR 1   // AHardwareBuffer import: the zero-copy hand-off to the frontend
+#endif
 #include <vulkan/vulkan.h>
 
 #include "core/gpu/vk/vk_device.h"
@@ -71,6 +74,8 @@ struct DeviceInternal {
   VkPhysicalDevice phys = VK_NULL_HANDLE;
   u32              qfam = 0;
   VkDeviceSize     non_coherent_atom = 1;
+  // vkGetAndroidHardwareBufferPropertiesANDROID where Limits::ahb_import, else null.
+  PFN_vkVoidFunction get_ahb_properties = nullptr;
 };
 
 inline VkBuffer vk_buf(const Buffer& b) { return reinterpret_cast<VkBuffer>(b.handle); }
