@@ -54,6 +54,7 @@ class Settings private constructor(private val file: File) {
     val fastTiming get() = getBoolean(FAST_TIMING, true)
     val gpu3d get() = getBoolean(GPU3D, false)
     val antiAliasing get() = getBoolean(ANTI_ALIASING, false)
+    val texFilter get() = getBoolean(TEX_FILTER, false)
     val gpuScale get() = getString(GPU_SCALE, "1").toIntOrNull()?.coerceIn(1, 8) ?: 1
     val firmwareBoot get() = getBoolean(FIRMWARE_BOOT, false)
     val internet get() = getBoolean(INTERNET, false)
@@ -112,6 +113,7 @@ class Settings private constructor(private val file: File) {
         const val GPU3D = "gpu3d"
         const val ANTI_ALIASING = "anti_aliasing"
         const val GPU_SCALE = "gpu_scale"
+        const val TEX_FILTER = "tex_filter"
         const val FIRMWARE_BOOT = "firmware_boot"
         const val INTERNET = "internet"
         const val FRAMESKIP = "frameskip"

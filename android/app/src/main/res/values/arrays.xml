@@ -20,12 +20,16 @@
         <item>2× (512×384)</item>
         <item>3× (768×576)</item>
         <item>4× (1024×768)</item>
+        <item>6× (1536×1152)</item>
+        <item>8× (2048×1536)</item>
     </string-array>
     <string-array name="gpu_scale_values" translatable="false">
         <item>1</item>
         <item>2</item>
         <item>3</item>
         <item>4</item>
+        <item>6</item>
+        <item>8</item>
     </string-array>
 
     <string-array name="filter_entries">

@@ -69,7 +69,7 @@ std::string sanitize(const std::string& name) {
 
 Session::Session() = default;
 
-Session::~Session() { stop(); }
+Session::~Session() { stop(); hires_.release_buffer(); }
 
 std::string Session::boot(const SessionConfig& cfg) {
   cfg_ = cfg;
@@ -131,11 +131,12 @@ std::string Session::boot(const SessionConfig& cfg) {
   if (cfg.jit && !jit_on_) LOGW("recompiler unavailable; interpreting");
 #endif
   nds.gpu3d.renderer().set_aa(cfg.aa);
-  // Upscaled 3D is the GPU raster's: a scale above 1 turns it on.
+  // Upscaled 3D and smoothed textures are the GPU raster's: either turns it on.
   const int scale = std::clamp(cfg.gpu_scale, 1, 8);
-  if (cfg.gpu3d || scale > 1) {
+  if (cfg.gpu3d || scale > 1 || cfg.tex_filter) {
     std::string why;
     nds.gpu3d.renderer().set_gpu_scale(static_cast<ds::u32>(scale));
+    nds.gpu3d.renderer().set_gpu_tex_filter(cfg.tex_filter);
     if (!nds.gpu3d.renderer().set_gpu(true, &why)) LOGW("gpu3d: unavailable (%s), drawing on the CPU", why.c_str());
     else if (scale > 1) nds.gpu.set_hires(true);
   }
@@ -381,15 +382,24 @@ void Session::run_one_frame() {
   const Clock::time_point now = Clock::now();
   if (drawn && (!ff || now - last_submit >= std::chrono::milliseconds(14))) {
     const ds::gpu::Gpu::Hires& h = nds.gpu.hires();
-    if (h.layer3d && h.scale > 1) {
-      // Copied now: the 3D picture's slot and the line records are reused by later frames.
+    if ((h.layer3d || h.layer3d_buffer) && h.scale > 1) {
+      // Copied now: the line records are reused by later frames. The 3D
+      // picture is copied too, unless it came as a buffer (zero-copy), which
+      // is referenced instead.
       const size_t n = static_cast<size_t>(ds::SCREEN_W) * ds::SCREEN_H;
       hires_.valid = true;
       hires_.scale = h.scale;
       hires_.desc.assign(h.desc.begin(), h.desc.end());
       hires_.operand.assign(h.operand.begin(), h.operand.end());
       hires_.line.assign(h.line.begin(), h.line.end());
-      hires_.layer.assign(h.layer3d, h.layer3d + n * h.scale * h.scale);
+      hires_.release_buffer();
+      if (h.layer3d_buffer) {
+        hires_.buffer = static_cast<AHardwareBuffer*>(const_cast<void*>(h.layer3d_buffer));
+        AHardwareBuffer_acquire(hires_.buffer);
+        hires_.layer.clear();
+      } else {
+        hires_.layer.assign(h.layer3d, h.layer3d + n * h.scale * h.scale);
+      }
       presenter_.submit(nds.gpu.framebuffer(0), nds.gpu.framebuffer(1), &hires_);
     } else {
       presenter_.submit(nds.gpu.framebuffer(0), nds.gpu.framebuffer(1));

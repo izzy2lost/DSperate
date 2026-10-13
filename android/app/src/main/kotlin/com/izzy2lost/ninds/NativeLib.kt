@@ -23,6 +23,7 @@ object NativeLib {
         fastTiming: Boolean,
         gpu3d: Boolean,
         gpuScale: Int,
+        texFilter: Boolean,
         antiAliasing: Boolean,
         internet: Boolean,
         audio: Boolean,

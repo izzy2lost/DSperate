@@ -30,6 +30,16 @@
             app:key="gpu_scale"
             app:title="@string/pref_gpu_scale"
             app:useSimpleSummaryProvider="true" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:selectable="false"
+            app:summary="@string/pref_gpu_scale_note" />
+        <SwitchPreferenceCompat
+            app:defaultValue="false"
+            app:iconSpaceReserved="false"
+            app:key="tex_filter"
+            app:summary="@string/pref_tex_filter_summary"
+            app:title="@string/pref_tex_filter" />
         <SwitchPreferenceCompat
             app:defaultValue="false"
             app:iconSpaceReserved="false"

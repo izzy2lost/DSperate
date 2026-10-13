@@ -84,6 +84,9 @@
     <string name="pref_gpu3d">GPU 3D (Vulkan)</string>
     <string name="pref_gpu3d_summary">Draws 3D on the GPU instead of the CPU. Helps heavy 3D games on slower phones.</string>
     <string name="pref_gpu_scale">3D resolution</string>
+    <string name="pref_gpu_scale_note">Above native uses GPU 3D. Each step costs GPU time: 6× and 8× need a high-end GPU.</string>
+    <string name="pref_tex_filter">Smooth textures</string>
+    <string name="pref_tex_filter_summary">Bilinear filtering for 3D textures. Uses GPU 3D.</string>
     <string name="pref_aa">3D anti-aliasing</string>
     <string name="pref_aa_summary">The DS\'s own edge smoothing, as games request it</string>
     <string name="pref_frameskip">Frame skip</string>

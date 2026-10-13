@@ -35,6 +35,7 @@ struct SessionConfig {
   bool fast_timing = true;
   bool gpu3d = false;
   int gpu_scale = 1;            // 3D internal resolution (1-8); above 1 implies the GPU raster
+  bool tex_filter = false;      // bilinear texture filtering; implies the GPU raster
   bool aa = false;
   bool internet = false;
   bool audio = true;

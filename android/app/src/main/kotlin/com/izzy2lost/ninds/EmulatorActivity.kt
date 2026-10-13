@@ -129,7 +129,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
                 romFd = pfd
                 NativeLib.nativeBoot(
                     pfd.fd, fileName, paths.savFile(stem).path, paths.cache.path, paths.bios.path,
-                    settings.firmwareBoot, settings.jit, settings.fastTiming, settings.gpu3d, settings.gpuScale, settings.antiAliasing,
+                    settings.firmwareBoot, settings.jit, settings.fastTiming, settings.gpu3d, settings.gpuScale, settings.texFilter, settings.antiAliasing,
                     settings.internet, settings.audio, settings.volume, settings.nickname, settings.message,
                     settings.birthdayMonth, settings.birthdayDay, settings.favouriteColour, settings.language,
                 )

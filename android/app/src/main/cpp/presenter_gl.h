@@ -9,6 +9,7 @@
 #pragma once
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
+#include <android/hardware_buffer.h>
 #include <android/native_window.h>
 
 #include <condition_variable>
@@ -29,6 +30,10 @@ struct HiresFrame {
   uint32_t scale = 1;
   std::vector<uint32_t> desc, operand, layer;   // 256x192, 256x192, (256*scale)x(192*scale)
   std::vector<uint32_t> line;                   // 192
+  // The 3D layer handed over without a copy (layer empty): an RGBA8 buffer
+  // holding the same words. A reference the frame's holder owns.
+  AHardwareBuffer* buffer = nullptr;
+  void release_buffer() { if (buffer) { AHardwareBuffer_release(buffer); buffer = nullptr; } }
 };
 
 class Presenter {
@@ -62,6 +67,9 @@ private:
   bool init_xbrz();
   bool init_hires();
   void upload_hires();
+  GLuint import_buffer(AHardwareBuffer* b);   // the GL texture sampling `b` (cached)
+  void store_ghost(int screen);
+  void drop_imports(bool all);
   void draw();
 
   std::thread thread_;
@@ -101,6 +109,25 @@ private:
   GLint hi_u_base_ = -1, hi_u_layer_ = -1, hi_u_desc_ = -1, hi_u_oper_ = -1, hi_u_line_ = -1;
   GLint hi_u_scale_ = -1, hi_u_screen_ = -1, hi_u_mode_ = -1, hi_u_out_ = -1;
   bool hi_failed_ = false, hi_uploaded_ = false;
+  GLint hi_u_layer8_ = -1, hi_u_kind_ = -1;
+  GLuint hi_layer8_tex_ = 0;                         // the frame's buffer, imported (not owned)
+  struct Imported { AHardwareBuffer* buffer; void* image; GLuint tex; };   // image: EGLImageKHR
+  std::vector<Imported> imported_;
+  bool import_failed_ = false;
+  // Per screen, the last picture it showed with high-res 3D, kept on the GPU.
+  // A later frame that shows the same picture again (a game displaying a
+  // display capture of it: dual-screen 3D, motion blur) draws its matching
+  // pixels from this instead of at 1x. Expires two frames after it was taken.
+  struct Ghost {
+    bool valid = false;
+    int age = 0;
+    uint32_t scale = 1, layer_scale = 0;
+    int layer_kind = 0;                       // 0 R32UI, 1 RGBA8 (from a buffer)
+    GLuint desc = 0, oper = 0, line = 0, native = 0, layer = 0;
+  };
+  Ghost ghost_[2];
+  GLuint ghost_fbo_[2] = {0, 0};              // read / draw framebuffers for the layer copy
+  GLint hi_u_ghost_ = -1, hi_u_cur_ = -1, hi_u_gnat_ = -1;
 };
 
 } // namespace ninds

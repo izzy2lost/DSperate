@@ -3,6 +3,9 @@
 #include "presenter_gl.h"
 #include "xbrz6x_shader.hpp"
 
+#include <EGL/eglext.h>
+#include <GLES2/gl2ext.h>
+
 #include <android/log.h>
 #include <pthread.h>
 
@@ -73,9 +76,10 @@ const char* kHiresFragment = R"(#version 300 es
 precision highp float;
 precision highp int;
 precision highp usampler2D;
-uniform sampler2D u_base;
+uniform sampler2D u_base, u_layer8, u_cur, u_gnat;
+uniform int u_ghost;   // 1: drawing a screen from an earlier frame's data, where today's picture still matches it
 uniform usampler2D u_layer, u_desc, u_oper, u_line;
-uniform int u_scale, u_screen, u_mode;
+uniform int u_scale, u_screen, u_mode, u_layer_kind;   // u_layer_kind 1: the layer is an RGBA8 buffer holding its words
 uniform vec2 u_out;
 in vec2 v_uv;
 out vec4 o_col;
@@ -94,13 +98,29 @@ vec4 base_colour() {
 }
 void main() {
   ivec2 px = clamp(ivec2(v_uv * SRC), ivec2(0), ivec2(255, 191));
+  if (u_ghost == 1) {
+    // A display capture keeps 5 bits a channel: compare at that precision.
+    uvec3 now = uvec3(texelFetch(u_cur, px, 0).rgb * 255.0 + 0.5) >> 3;
+    uvec3 then = uvec3(texelFetch(u_gnat, px, 0).rgb * 255.0 + 0.5) >> 3;
+    if (any(notEqual(now, then))) { o_col = base_colour(); return; }
+  }
   uint meta = texelFetch(u_line, ivec2(px.y, 0), 0).r;
   if ((meta & 1u) == 0u || int((meta >> 1) & 1u) != u_screen) { o_col = base_colour(); return; }
   uint d = texelFetch(u_desc, px, 0).r;
   uint mode = d & 7u;
   if (mode == 0u) { o_col = base_colour(); return; }
   ivec2 hp = clamp(ivec2(v_uv * SRC * float(u_scale)), ivec2(0), ivec2(256 * u_scale - 1, 192 * u_scale - 1));
-  uint h = texelFetch(u_layer, hp, 0).r;
+  // The 3D layer's horizontal scroll (BG0HOFS): this column shows the
+  // raster's column + scroll, mod 512, and nothing where that is past 255.
+  int sx = hp.x + int((meta >> 2) & 0x1FFu) * u_scale;
+  int span = 512 * u_scale;
+  sx -= (sx / span) * span;
+  uint h = 0u;
+  if (sx < 256 * u_scale) {
+    ivec2 sp = ivec2(sx, hp.y);
+    if (u_layer_kind == 1) { uvec4 b = uvec4(round(texelFetch(u_layer8, sp, 0) * 255.0)); h = b.r | (b.g << 8) | (b.b << 16) | (b.a << 24); }
+    else h = texelFetch(u_layer, sp, 0).r;
+  }
   uint a5 = (h >> 24) & 31u;
   uvec3 c3 = ch(h), op = ch(texelFetch(u_oper, px, 0).r);
   uint eva = (d >> 3) & 31u, evb = (d >> 8) & 31u, evy = (d >> 13) & 31u;
@@ -154,6 +174,8 @@ void Presenter::stop() {
   }
   cv_.notify_all();
   thread_.join();
+  hi_front_.release_buffer();
+  hi_back_.release_buffer();
 }
 
 void Presenter::set_window(ANativeWindow* window) {
@@ -269,6 +291,14 @@ void Presenter::release_all() {
   hi_tex_[0] = hi_tex_[1] = hi_tex_[2] = hi_tex_[3] = 0;
   hi_layer_scale_ = 0;
   hi_uploaded_ = false;
+  drop_imports(true);
+  hi_layer8_tex_ = 0;
+  for (Ghost& g : ghost_) {
+    if (surface_ != EGL_NO_SURFACE) { GLuint t[5] = {g.desc, g.oper, g.line, g.native, g.layer}; glDeleteTextures(5, t); }
+    g = Ghost{};
+  }
+  if (ghost_fbo_[0] && surface_ != EGL_NO_SURFACE) glDeleteFramebuffers(2, ghost_fbo_);
+  ghost_fbo_[0] = ghost_fbo_[1] = 0;
   program_ = 0;
   tex_[0] = tex_[1] = 0;
   xbrz_prog_ = xbrz_vbo_ = 0;
@@ -360,6 +390,11 @@ bool Presenter::init_hires() {
   hi_u_screen_ = glGetUniformLocation(hi_prog_, "u_screen");
   hi_u_mode_ = glGetUniformLocation(hi_prog_, "u_mode");
   hi_u_out_ = glGetUniformLocation(hi_prog_, "u_out");
+  hi_u_layer8_ = glGetUniformLocation(hi_prog_, "u_layer8");
+  hi_u_kind_ = glGetUniformLocation(hi_prog_, "u_layer_kind");
+  hi_u_ghost_ = glGetUniformLocation(hi_prog_, "u_ghost");
+  hi_u_cur_ = glGetUniformLocation(hi_prog_, "u_cur");
+  hi_u_gnat_ = glGetUniformLocation(hi_prog_, "u_gnat");
   glGenTextures(3, hi_tex_);
   const GLsizei dims[3][2] = {{W, H}, {W, H}, {H, 1}};
   for (int i = 0; i < 3; ++i) {
@@ -371,9 +406,49 @@ bool Presenter::init_hires() {
   return true;
 }
 
+GLuint Presenter::import_buffer(AHardwareBuffer* b) {
+  for (const Imported& i : imported_) if (i.buffer == b) return i.tex;
+  if (import_failed_) return 0;
+  static auto get_client_buffer = reinterpret_cast<PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC>(eglGetProcAddress("eglGetNativeClientBufferANDROID"));
+  static auto create_image = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
+  static auto target_texture = reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(eglGetProcAddress("glEGLImageTargetTexture2DOES"));
+  if (!get_client_buffer || !create_image || !target_texture) { LOGW("no EGL image import; high-res 3D shown at 1x"); import_failed_ = true; return 0; }
+  const EGLint attrs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
+  EGLImageKHR image = create_image(display_, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, get_client_buffer(b), attrs);
+  if (image == EGL_NO_IMAGE_KHR) { LOGW("eglCreateImageKHR failed: %x", eglGetError()); import_failed_ = true; return 0; }
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  target_texture(GL_TEXTURE_2D, static_cast<GLeglImageOES>(image));
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  AHardwareBuffer_acquire(b);   // the cache's own reference: the address cannot be reused while cached
+  imported_.push_back({b, image, tex});
+  return tex;
+}
+
+// Imports no frame refers to any more (all: every one, the context is going).
+void Presenter::drop_imports(bool all) {
+  static auto destroy_image = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
+  for (size_t i = 0; i < imported_.size();) {
+    Imported& im = imported_[i];
+    if (!all && (im.buffer == hi_front_.buffer || im.buffer == hi_back_.buffer)) { ++i; continue; }
+    if (surface_ != EGL_NO_SURFACE) glDeleteTextures(1, &im.tex);
+    if (destroy_image) destroy_image(display_, static_cast<EGLImageKHR>(im.image));
+    AHardwareBuffer_release(im.buffer);
+    imported_.erase(imported_.begin() + static_cast<long>(i));
+  }
+}
+
 void Presenter::upload_hires() {
   const HiresFrame& h = hi_front_;
-  if (h.scale != hi_layer_scale_) {
+  hi_layer8_tex_ = 0;
+  if (h.buffer) {
+    // A raster rebuild (new scale) brings new buffers: let the old ones go.
+    if (imported_.size() > 8) drop_imports(false);
+    hi_layer8_tex_ = import_buffer(h.buffer);
+  }
+  if (!h.buffer && h.scale != hi_layer_scale_) {
     // Immutable storage: a new scale is a new texture.
     if (hi_tex_[3]) glDeleteTextures(1, &hi_tex_[3]);
     glGenTextures(1, &hi_tex_[3]);
@@ -390,9 +465,58 @@ void Presenter::upload_hires() {
   glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_RED_INTEGER, GL_UNSIGNED_INT, h.operand.data());
   glBindTexture(GL_TEXTURE_2D, hi_tex_[2]);
   glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, H, 1, GL_RED_INTEGER, GL_UNSIGNED_INT, h.line.data());
-  glBindTexture(GL_TEXTURE_2D, hi_tex_[3]);
-  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W * h.scale, H * h.scale, GL_RED_INTEGER, GL_UNSIGNED_INT, h.layer.data());
+  if (!h.buffer) {
+    glBindTexture(GL_TEXTURE_2D, hi_tex_[3]);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W * h.scale, H * h.scale, GL_RED_INTEGER, GL_UNSIGNED_INT, h.layer.data());
+  }
   hi_uploaded_ = true;
+}
+
+void Presenter::store_ghost(int screen) {
+  Ghost& g = ghost_[screen];
+  while (glGetError() != GL_NO_ERROR) {}   // only this copy's errors decide its validity
+  const HiresFrame& h = hi_front_;
+  auto make = [](GLuint& t, GLenum fmt, GLsizei w, GLsizei hh, bool swizzle) {
+    if (t) return;
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexStorage2D(GL_TEXTURE_2D, 1, fmt, w, hh);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    if (swizzle) {
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+    }
+  };
+  make(g.desc, GL_R32UI, W, H, false);
+  make(g.oper, GL_R32UI, W, H, false);
+  make(g.line, GL_R32UI, H, 1, false);
+  make(g.native, GL_RGBA8, W, H, true);
+  const int kind = h.buffer ? 1 : 0;
+  if (g.layer && (g.layer_scale != h.scale || g.layer_kind != kind)) { glDeleteTextures(1, &g.layer); g.layer = 0; }
+  make(g.layer, kind ? GL_RGBA8 : GL_R32UI, W * h.scale, H * h.scale, false);
+  g.layer_scale = h.scale; g.layer_kind = kind; g.scale = h.scale;
+  glBindTexture(GL_TEXTURE_2D, g.desc);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_RED_INTEGER, GL_UNSIGNED_INT, h.desc.data());
+  glBindTexture(GL_TEXTURE_2D, g.oper);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_RED_INTEGER, GL_UNSIGNED_INT, h.operand.data());
+  glBindTexture(GL_TEXTURE_2D, g.line);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, H, 1, GL_RED_INTEGER, GL_UNSIGNED_INT, h.line.data());
+  glBindTexture(GL_TEXTURE_2D, g.native);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, front_.data() + screen * W * H);
+  // The 3D layer: a GPU-side copy, its source being reused by later frames.
+  if (!ghost_fbo_[0]) glGenFramebuffers(2, ghost_fbo_);
+  const GLuint src = kind ? hi_layer8_tex_ : hi_tex_[3];
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, ghost_fbo_[0]);
+  glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, src, 0);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, ghost_fbo_[1]);
+  glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g.layer, 0);
+  const GLint sw = static_cast<GLint>(W * h.scale), sh = static_cast<GLint>(H * h.scale);
+  glBlitFramebuffer(0, 0, sw, sh, 0, 0, sw, sh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+  g.valid = glGetError() == GL_NO_ERROR;
+  g.age = 0;
 }
 
 void Presenter::draw() {
@@ -406,6 +530,7 @@ void Presenter::draw() {
     if (fresh_) {
       front_.swap(back_); std::memcpy(back_.data(), front_.data(), W * H * 2 * 4); fresh_ = false; have_frame_ = false;
       std::swap(hi_front_, hi_back_); hi_back_.valid = false; hi_uploaded_ = false;
+      for (Ghost& g : ghost_) ++g.age;
     }
     dirty_ = false;
   }
@@ -446,9 +571,14 @@ void Presenter::draw() {
   }
   // Which screen (if any) shows engine A's 3D at the internal resolution.
   int hi_screen = -1;
-  if (hi_front_.valid && hi_front_.scale > 1 && hi_front_.layer.size() >= static_cast<size_t>(W * H) * hi_front_.scale * hi_front_.scale && init_hires()) {
+  const bool have_layer = hi_front_.buffer || hi_front_.layer.size() >= static_cast<size_t>(W * H) * hi_front_.scale * hi_front_.scale;
+  if (hi_front_.valid && hi_front_.scale > 1 && have_layer && init_hires()) {
     for (uint32_t l : hi_front_.line) if (l & 1u) { hi_screen = static_cast<int>((l >> 1) & 1u); break; }
-    if (hi_screen >= 0 && !hi_uploaded_) upload_hires();
+    if (hi_screen >= 0 && !hi_uploaded_) {
+      upload_hires();
+      if (!(hi_front_.buffer && !hi_layer8_tex_)) store_ghost(hi_screen);
+    }
+    if (hi_front_.buffer && !hi_layer8_tex_) hi_screen = -1;   // the import failed: the 1x picture
   }
   const EGLint sw = ANativeWindow_getWidth(window_), sh = ANativeWindow_getHeight(window_);
   glViewport(0, 0, sw, sh);
@@ -483,7 +613,35 @@ void Presenter::draw() {
       glUniform1i(hi_u_screen_, s);
       glUniform1i(hi_u_mode_, xbrz ? LINEAR : filter);
       glUniform2f(hi_u_out_, static_cast<float>(r.w), static_cast<float>(r.h));
+      glUniform1i(hi_u_layer8_, 5);
+      glUniform1i(hi_u_kind_, hi_front_.buffer ? 1 : 0);
       for (int t = 0; t < 4; ++t) { glActiveTexture(GL_TEXTURE1 + t); glBindTexture(GL_TEXTURE_2D, hi_tex_[t == 0 ? 3 : t - 1]); }
+      glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, hi_layer8_tex_);
+      glUniform1i(hi_u_ghost_, 0);
+      glActiveTexture(GL_TEXTURE0);
+      glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+      glUseProgram(program_);
+      continue;
+    }
+    const Ghost& g = ghost_[s];
+    if (hi_prog_ && g.valid && g.age <= 2) {
+      glUseProgram(hi_prog_);
+      glUniform1i(hi_u_base_, 0);
+      glUniform1i(hi_u_layer_, 1);
+      glUniform1i(hi_u_desc_, 2);
+      glUniform1i(hi_u_oper_, 3);
+      glUniform1i(hi_u_line_, 4);
+      glUniform1i(hi_u_layer8_, 5);
+      glUniform1i(hi_u_cur_, 6);
+      glUniform1i(hi_u_gnat_, 7);
+      glUniform1i(hi_u_scale_, static_cast<GLint>(g.scale));
+      glUniform1i(hi_u_screen_, s);
+      glUniform1i(hi_u_mode_, xbrz ? LINEAR : filter);
+      glUniform1i(hi_u_kind_, g.layer_kind);
+      glUniform1i(hi_u_ghost_, 1);
+      glUniform2f(hi_u_out_, static_cast<float>(r.w), static_cast<float>(r.h));
+      const GLuint units[8] = {0, g.layer_kind ? 0u : g.layer, g.desc, g.oper, g.line, g.layer_kind ? g.layer : 0u, tex_[s], g.native};
+      for (int t = 1; t < 8; ++t) { glActiveTexture(GL_TEXTURE0 + t); glBindTexture(GL_TEXTURE_2D, units[t]); }
       glActiveTexture(GL_TEXTURE0);
       glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
       glUseProgram(program_);
