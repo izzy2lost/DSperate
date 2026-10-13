@@ -775,11 +775,19 @@ inline void viewport_vertex(Vertex& vt, const std::array<u32, 6>& viewport) {
     u32 den = w;
     if (w > 0xFFFF) { px >>= 1; py >>= 1; den >>= 1; }
     den <<= 1;
+    // The sub-pixel position first, from the operands the hardware divides
+    // (64-bit: the 32-bit product below may wrap, and that wrap is the DS's).
+    vt.fx = static_cast<s32>(((static_cast<u64>(px) * viewport[4]) << 6) / den + (static_cast<u64>(viewport[0]) << 6));
+    vt.fy = static_cast<s32>(((static_cast<u64>(py) * viewport[5]) << 6) / den + (static_cast<u64>(viewport[3]) << 6));
     px = ((px * viewport[4]) / den) + viewport[0];
     py = ((py * viewport[5]) / den) + viewport[3];
   }
   vt.sx = px & 0x1FF;
   vt.sy = py & 0xFF;
+  // Where the hardware's arithmetic wrapped (or W was 0), the whole-pixel
+  // position is the only one that agrees with it.
+  if (w == 0 || (vt.fx >> 6) != vt.sx) vt.fx = vt.sx << 6;
+  if (w == 0 || (vt.fy >> 6) != vt.sy) vt.fy = vt.sy << 6;
 }
 
 // 5-bit colour to 9 bits: (c << 4) + 0xF for non-zero components.

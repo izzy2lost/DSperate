@@ -41,7 +41,12 @@ void main() {
   // give it one pixel via the second/third vertex.
   if (p.xmax == p.xmin) ox = (vi == 1u || vi == 2u) ? 1.0 : 0.0;
   if (p.ybot == p.ytop) oy = (vi == 1u || vi == 2u) ? 1.0 : 0.0;
-  float x = (sxf + ox) / 256.0 * 2.0 - 1.0, y = (syf + oy) / 192.0 * 2.0 - 1.0;
+  // Above 1x the vertex sits at its sub-pixel position (the DS's transform
+  // before it truncates to whole pixels); the edge rules above stay decided on
+  // the whole-pixel position, so coverage matches the DS's span rules.
+  float px = sxf, py = syf;
+  if (pc.f.scale > 1u) { px = float(vt.fx) / 64.0; py = float(vt.fy) / 64.0; }
+  float x = (px + ox) / 256.0 * 2.0 - 1.0, y = (py + oy) / 192.0 * 2.0 - 1.0;
   float z = clamp(float(vt.z), 0.0, 16777215.0);
   // Z-buffer: z/2^24 linear in screen space. W-buffer: vt.z is already the
   // per-polygon normalised depth the DS compares; 1/z interpolated

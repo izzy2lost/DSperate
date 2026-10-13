@@ -1,0 +1,23 @@
+/.kotlin/
+/.gradle/
+/build/
+/app/build/
+/app/.cxx/
+/app/.externalNativeBuild/
+/captures/
+/local.properties
+*.apk
+*.aab
+
+# Signed bundle/APK output from Android Studio's "Generate Signed Bundle / APK",
+# including the unpacked copy of the bundle it leaves next to the .aab
+/app/release/
+/app/debug/
+*.apks
+output-metadata.json
+
+# Signing keys and their credentials must never be committed
+*.jks
+*.keystore
+keystore.properties
+key.properties

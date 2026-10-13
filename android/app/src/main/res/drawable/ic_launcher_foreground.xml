@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- An open dual-screen handheld, kept inside the 66dp adaptive-icon safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#FFF5F5F7" android:pathData="M39,27h30a4,4 0 0 1 4,4v18a4,4 0 0 1 -4,4h-30a4,4 0 0 1 -4,-4v-18a4,4 0 0 1 4,-4z" />
+    <path android:fillColor="#FFF5F5F7" android:pathData="M39,55h30a4,4 0 0 1 4,4v18a4,4 0 0 1 -4,4h-30a4,4 0 0 1 -4,-4v-18a4,4 0 0 1 4,-4z" />
+    <path android:fillColor="#FFC9CBD1" android:pathData="M37,53h34v2h-34z" />
+    <path android:fillColor="#FF20232A" android:pathData="M39,31h30v18h-30z" />
+    <path android:fillColor="#FF20232A" android:pathData="M44,59h20v15h-20z" />
+    <path android:fillColor="#3DFFFFFF" android:pathData="M39,31h30v5.5l-30,7z" />
+    <path android:fillColor="#3DFFFFFF" android:pathData="M44,59h20v4.5l-20,5z" />
+    <path android:fillColor="#FF5A5E68" android:pathData="M38.8,62h1.4v5h-1.4zM37,63.8h5v1.4h-5z" />
+    <path android:fillColor="#FF5A5E68" android:pathData="M68.5,61.7a0.9,0.9 0 1 1 0,1.8a0.9,0.9 0 1 1 0,-1.8zM68.5,65.5a0.9,0.9 0 1 1 0,1.8a0.9,0.9 0 1 1 0,-1.8zM66.6,63.6a0.9,0.9 0 1 1 0,1.8a0.9,0.9 0 1 1 0,-1.8zM70.4,63.6a0.9,0.9 0 1 1 0,1.8a0.9,0.9 0 1 1 0,-1.8z" />
+</vector>

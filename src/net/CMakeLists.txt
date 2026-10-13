@@ -78,5 +78,5 @@ target_compile_options(dsperate_slirp PRIVATE -w)
 add_library(dsperate_net STATIC
   lan_mp.cpp
   slirp_driver.cpp)
-target_include_directories(dsperate_net PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(dsperate_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(dsperate_net PUBLIC dsperate_core dsperate_enet dsperate_slirp)

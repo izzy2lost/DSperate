@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NinDS</string>
+
+    <!-- Library -->
+    <string name="action_search">Search</string>
+    <string name="action_refresh">Rescan games</string>
+    <string name="action_folder">Choose ROM folder</string>
+    <string name="action_settings">Settings</string>
+    <string name="action_open_file">Open a game file…</string>
+    <string name="open_file_failed">That file is not a Nintendo DS game</string>
+    <string name="search_hint">Search games</string>
+    <string name="library_empty_no_folder">Pick the folder that holds your Nintendo DS games (.nds or .zip) to build your library.</string>
+    <string name="library_empty_no_games">No Nintendo DS games were found in that folder.</string>
+    <string name="choose_folder">Choose ROM folder</string>
+    <string name="choose_other_folder">Choose another folder</string>
+    <string name="scanning_progress">Scanning %1$d of %2$d</string>
+    <string name="scan_failed">Could not read the folder: %1$s</string>
+    <string name="game_play">Play</string>
+    <string name="game_resume">Resume where you left off</string>
+    <string name="game_import_save">Import save file…</string>
+    <string name="game_export_save">Export save file…</string>
+    <string name="game_delete_save">Delete save file</string>
+    <string name="delete_save_confirm">Delete the save file for %1$s? A backup copy (.bak) is kept beside it.</string>
+    <string name="save_deleted">Save file deleted</string>
+    <string name="save_imported">Save file imported</string>
+    <string name="save_import_failed">Could not import that save file</string>
+    <string name="save_exported">Save file exported</string>
+    <string name="save_export_failed">Could not export the save file</string>
+    <string name="delete">Delete</string>
+
+    <!-- Emulator -->
+    <string name="boot_loading">Starting %1$s…</string>
+    <string name="error_open_rom">Could not open the game file.</string>
+    <string name="error_boot_title">This game could not start</string>
+    <string name="fps_format">%1$.1f FPS</string>
+    <string name="lid_closed">Lid closed</string>
+    <string name="lid_opened">Lid opened</string>
+    <string name="reset_confirm">Restart the game? Anything since your last save is lost.</string>
+    <string name="state_saved">Saved to slot %1$d</string>
+    <string name="state_loaded">State loaded</string>
+    <string name="slot_label">Slot %1$d</string>
+    <string name="slot_auto">Auto-save (on exit)</string>
+    <string name="slot_empty">Empty</string>
+    <string name="screenshot_saved">Screenshot saved to Pictures/NinDS</string>
+    <string name="screenshot_failed">Could not save the screenshot</string>
+
+    <!-- In-game menu -->
+    <string name="menu_resume">Resume</string>
+    <string name="menu_save_state">Save state</string>
+    <string name="menu_load_state">Load state</string>
+    <string name="menu_fast_forward_on">Fast forward</string>
+    <string name="menu_fast_forward_off">Normal speed</string>
+    <string name="menu_layout">Screen layout</string>
+    <string name="menu_swap">Swap screens</string>
+    <string name="menu_cheats">Cheats</string>
+    <string name="menu_screenshot">Screenshot</string>
+    <string name="menu_close_lid">Close lid</string>
+    <string name="menu_open_lid">Open lid</string>
+    <string name="menu_reset">Restart</string>
+    <string name="menu_settings">Settings</string>
+    <string name="menu_exit">Exit game</string>
+
+    <!-- Cheats -->
+    <string name="cheats_title">Cheats</string>
+    <string name="cheats_apply">Apply</string>
+    <string name="cheats_add">Add code</string>
+    <string name="cheats_database">Database</string>
+    <string name="cheats_import">Import</string>
+    <string name="cheats_none">No cheats yet. Add an Action Replay code, or import usrcheat.dat in Settings to pick from a database. Long-press a cheat to delete it.</string>
+    <string name="cheats_delete_confirm">Delete this cheat?</string>
+    <string name="cheats_name_hint">Name</string>
+    <string name="cheats_code_hint">Action Replay code (e.g. 12345678 9ABCDEF0)</string>
+    <string name="cheats_bad_code">Codes are pairs of 8-digit hex numbers</string>
+    <string name="cheats_unnamed">Cheat</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="pref_cat_emulation">Emulation</string>
+    <string name="pref_jit">Recompiler (JIT)</string>
+    <string name="pref_jit_summary">Translates DS code to ARM64. Much faster; turn off only to debug a game.</string>
+    <string name="pref_fast_timing">Fast CPU timing</string>
+    <string name="pref_fast_timing_summary">Simpler memory timing for speed. Turn off for the exact model if a game misbehaves.</string>
+    <string name="pref_gpu3d">GPU 3D (Vulkan)</string>
+    <string name="pref_gpu3d_summary">Draws 3D on the GPU instead of the CPU. Helps heavy 3D games on slower phones.</string>
+    <string name="pref_gpu_scale">3D resolution</string>
+    <string name="pref_aa">3D anti-aliasing</string>
+    <string name="pref_aa_summary">The DS\'s own edge smoothing, as games request it</string>
+    <string name="pref_frameskip">Frame skip</string>
+    <string name="pref_ff_speed">Fast-forward speed</string>
+    <string name="pref_ff_toggle">Fast-forward button toggles</string>
+    <string name="pref_ff_toggle_summary">Off: fast-forward only while the button is held</string>
+    <string name="pref_firmware_boot">Boot through the DS menu</string>
+    <string name="pref_firmware_boot_summary">Needs your own BIOS and firmware dumps. Off starts games directly.</string>
+    <string name="pref_internet">Wi-Fi internet (Wiimmfi)</string>
+    <string name="pref_internet_summary">Lets games go online through Wiimmfi, the community Nintendo WFC replacement</string>
+    <string name="pref_auto_save_state">Auto-save state on exit</string>
+    <string name="pref_auto_save_state_summary">Long-press a game in the library to resume where you left off</string>
+    <string name="pref_restart_note">Emulation settings take effect the next time a game starts.</string>
+
+    <string name="pref_cat_video">Video</string>
+    <string name="pref_layout_portrait">Layout in portrait</string>
+    <string name="pref_layout_landscape">Layout in landscape</string>
+    <string name="pref_swap">Swap screens</string>
+    <string name="pref_filter">Screen filter</string>
+    <string name="pref_integer">Integer scaling</string>
+    <string name="pref_integer_summary">Whole-number zoom only: perfectly even pixels, smaller picture</string>
+    <string name="pref_gap">Gap between screens (dp)</string>
+    <string name="pref_orientation">Orientation</string>
+    <string name="pref_show_fps">Show FPS</string>
+    <string name="pref_theme">App theme</string>
+
+    <string name="pref_cat_audio">Audio</string>
+    <string name="pref_audio">Sound</string>
+    <string name="pref_volume">Volume</string>
+
+    <string name="pref_cat_controls">Controls</string>
+    <string name="pref_touch_controls">On-screen controls</string>
+    <string name="pref_hide_with_gamepad">Hide when a controller is connected</string>
+    <string name="pref_opacity">Controls opacity</string>
+    <string name="pref_scale">Controls size</string>
+    <string name="pref_haptics">Vibrate on press</string>
+    <string name="pref_stick_dpad">Left stick as D-pad</string>
+    <string name="pref_controller_mapping">Controller mapping</string>
+    <string name="pref_controller_mapping_summary">Bind gamepad and keyboard buttons, and hotkeys like fast forward</string>
+
+    <string name="pref_cat_system">DS user settings</string>
+    <string name="pref_nickname">Nickname</string>
+    <string name="pref_message">Personal message</string>
+    <string name="pref_birthday_month">Birthday month</string>
+    <string name="pref_birthday_day">Birthday day</string>
+    <string name="pref_colour">Favourite colour</string>
+    <string name="pref_language">Language</string>
+    <string name="pref_system_note">Used when no firmware dump is installed, or the dump has no settings yet.</string>
+
+    <string name="pref_cat_files">BIOS, firmware and files</string>
+    <string name="pref_bios_note">Optional. Without them NinDS uses a built-in BIOS and starts games directly. Dumps from your own DS give exact timing and the DS menu.</string>
+    <string name="pref_bios9">ARM9 BIOS (bios9.bin)</string>
+    <string name="pref_bios7">ARM7 BIOS (bios7.bin)</string>
+    <string name="pref_firmware">Firmware (firmware.bin)</string>
+    <string name="pref_clear_bios">Remove BIOS and firmware</string>
+    <string name="clear_bios_confirm">Remove the imported BIOS and firmware files? NinDS goes back to its built-in BIOS.</string>
+    <string name="bios_present">Installed. Tap to replace.</string>
+    <string name="bios_missing">Not installed. Tap to import.</string>
+    <string name="bios_wrong_size">That is not a valid %1$s (wrong size)</string>
+    <string name="bios_imported">%1$s imported</string>
+    <string name="pref_cheat_db">Cheat database (usrcheat.dat)</string>
+    <string name="cheat_db_present">Installed. Tap to replace.</string>
+    <string name="cheat_db_missing">Import an R4 usrcheat.dat to pick cheats in game</string>
+    <string name="cheat_db_imported">Cheat database imported</string>
+    <string name="cheat_db_invalid">That is not an R4 usrcheat.dat file</string>
+    <string name="pref_rom_folder">ROM folder</string>
+    <string name="rom_folder_none">Not chosen</string>
+    <string name="rom_folder_cleared">ROM folder forgotten. Choose one from the library.</string>
+    <string name="pref_clear_cache">Clear unpacked games</string>
+    <string name="pref_clear_cache_summary">Zipped games are unpacked once and kept; this frees that space</string>
+    <string name="cache_cleared">Freed %1$d MB</string>
+
+    <string name="pref_cat_about">About</string>
+    <string name="pref_about">NinDS</string>
+    <string name="about_summary">Version %1$s · Nintendo DS emulation by the DSperate core · GPL-3.0</string>
+
+    <!-- Controller mapping -->
+    <string name="mapping_press">Press the button to use for this. A new binding replaces any other use of that button.</string>
+    <string name="mapping_clear">Clear</string>
+    <string name="mapping_unbound">Not bound</string>
+    <string name="mapping_reset">Reset to defaults</string>
+    <string name="mapping_reset_confirm">Put every binding back to the defaults?</string>
+</resources>

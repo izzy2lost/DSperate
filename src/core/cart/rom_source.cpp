@@ -88,14 +88,21 @@ std::unique_ptr<RomSource> RomSource::map_file(const std::string& path, u64 offs
   err.clear();
   const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
   if (fd < 0) { err = std::strerror(errno); return nullptr; }
+  std::unique_ptr<RomSource> s = map_fd(fd, offset, size, err);
+  close(fd);
+  return s;
+}
+
+std::unique_ptr<RomSource> RomSource::map_fd(int fd, u64 offset, u64 size, std::string& err) {
+  err.clear();
   struct stat st{};
-  if (fstat(fd, &st) != 0) { err = std::strerror(errno); close(fd); return nullptr; }
+  if (fstat(fd, &st) != 0) { err = std::strerror(errno); return nullptr; }
   const u64 file = static_cast<u64>(st.st_size);
-  if (offset > file) { err = "range starts past the end of the file"; close(fd); return nullptr; }
+  if (offset > file) { err = "range starts past the end of the file"; return nullptr; }
   if (size == 0) size = file - offset;
-  if (size > file - offset) { err = "range runs past the end of the file"; close(fd); return nullptr; }
-  if (size > MAX_ROM) { err = "larger than any DS card"; close(fd); return nullptr; }
-  if (size == 0) { err = "empty"; close(fd); return nullptr; }
+  if (size > file - offset) { err = "range runs past the end of the file"; return nullptr; }
+  if (size > MAX_ROM) { err = "larger than any DS card"; return nullptr; }
+  if (size == 0) { err = "empty"; return nullptr; }
 
   const long ps = sysconf(_SC_PAGESIZE);
   const u64 align = static_cast<u64>(ps > 0 ? ps : 4096);
@@ -117,7 +124,6 @@ std::unique_ptr<RomSource> RomSource::map_file(const std::string& path, u64 offs
   if (populate && m != MAP_FAILED) { volatile u8 sink = 0; for (size_t i = 0; i < len; i += 4096) sink += static_cast<const u8*>(m)[i]; (void)sink; }
 #endif
   if (populate && m != MAP_FAILED) std::fprintf(stderr, "rom: preloaded %llu MB%s\n", (unsigned long long)((len + (1 << 20) - 1) >> 20), g_preload == Preload::Auto ? " (network filesystem)" : "");
-  close(fd);
   if (m == MAP_FAILED) { err = std::string("mmap: ") + std::strerror(errno); return nullptr; }
 
   std::unique_ptr<RomSource> s(new RomSource);

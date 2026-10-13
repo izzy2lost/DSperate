@@ -48,7 +48,7 @@ target_include_directories(dsperate_cheevos PRIVATE ${RC_DIR}/src/rapi)
 # tarball build or a checkout with no tags.
 set(DSPERATE_CHEEVOS_VERSION "" CACHE STRING "Version DSperate reports to RetroAchievements (default: latest git tag)")
 if(NOT DSPERATE_CHEEVOS_VERSION)
-  execute_process(COMMAND git -C ${CMAKE_SOURCE_DIR} describe --tags --abbrev=0
+  execute_process(COMMAND git -C ${PROJECT_SOURCE_DIR} describe --tags --abbrev=0
                   OUTPUT_VARIABLE _ds_tag OUTPUT_STRIP_TRAILING_WHITESPACE
                   ERROR_QUIET RESULT_VARIABLE _ds_tag_rc)
   if(_ds_tag_rc EQUAL 0 AND _ds_tag MATCHES "^v?([0-9]+\\.[0-9]+(\\.[0-9]+)?)$")

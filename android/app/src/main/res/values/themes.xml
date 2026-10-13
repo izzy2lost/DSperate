@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.NinDS" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/ninds_primary</item>
+        <item name="colorOnPrimary">@color/ninds_on_primary</item>
+        <item name="colorPrimaryContainer">@color/ninds_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/ninds_on_primary_container</item>
+        <item name="colorSecondary">@color/ninds_secondary</item>
+        <item name="colorSurface">@color/ninds_surface</item>
+        <item name="android:colorBackground">@color/ninds_background</item>
+        <item name="android:windowBackground">@color/ninds_background</item>
+        <item name="preferenceTheme">@style/PreferenceThemeOverlay</item>
+    </style>
+
+    <!-- The game draws edge to edge on black; dialogs over it follow the app theme. -->
+    <style name="Theme.NinDS.Emulator" parent="Theme.NinDS">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>

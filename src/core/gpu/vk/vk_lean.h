@@ -21,13 +21,18 @@ namespace ds::gpu::vk {
 class Lean {
 public:
   // `msaa`: 4x MSAA where the device has it (video.aa on the GPU raster); else 1 sample.
-  static std::unique_ptr<Lean> create(Device& dev, bool msaa, std::string* why = nullptr);
+  // `scale`: internal resolution multiplier (1-8). Above 1 the frame is drawn
+  // at scale x the DS's resolution; the 3D layer record the compositor and
+  // display capture read is its top-left sample per DS pixel (where the DS
+  // evaluates a pixel), and the whole picture is kept for hires_of().
+  static std::unique_ptr<Lean> create(Device& dev, bool msaa, u32 scale = 1, std::string* why = nullptr);
   ~Lean();
   Lean(const Lean&) = delete;
   Lean& operator=(const Lean&) = delete;
 
   bool ready() const { return ready_; }
   bool msaa() const;   // 4x MSAA in use (else 1 sample: the device could not)
+  u32 scale() const;
 
   // Frame input: polygons, vertices and post tables are host staging
   // (rewritten freely between submits); the texel arena is mapped device
@@ -52,6 +57,10 @@ public:
   // stall); else a wait on the newest. Null before the first frame.
   const u32* newest_ready(bool allow_lag);
   bool has_frame() const;
+  // The scale x scale picture of the frame whose record is `record` (a
+  // pointer output()/newest_ready() returned), same word layout, 256*scale
+  // wide; null at scale 1 or for a record this raster did not hand out.
+  const u32* hires_of(const u32* record) const;
 
   // GPU time of the last waited frame in ns (DS_VK_TIMING=1 and timestamps), else 0.
   u64 gpu_ns() const;

@@ -8,8 +8,10 @@
 namespace ds::gpu::vk {
 struct Lean::Impl {};
 Lean::~Lean() = default;
-std::unique_ptr<Lean> Lean::create(Device&, bool, std::string* why) { if (why) *why = "built without Vulkan"; return nullptr; }
+std::unique_ptr<Lean> Lean::create(Device&, bool, u32, std::string* why) { if (why) *why = "built without Vulkan"; return nullptr; }
 bool Lean::msaa() const { return false; }
+u32 Lean::scale() const { return 1; }
+const u32* Lean::hires_of(const u32*) const { return nullptr; }
 GpuPoly* Lean::poly_buffer() { return nullptr; }
 GpuVert* Lean::vert_buffer() { return nullptr; }
 u32* Lean::texel_buffer(u32* cap) { if (cap) *cap = 0; return nullptr; }
@@ -60,6 +62,10 @@ struct Lean::Impl {
   const Api* api = nullptr;
   Device* dev = nullptr;
   bool msaa = false, timing = false;
+  u32 scale = 1;                  // internal resolution multiplier
+  // Above 1x, out[] holds the scaled picture and native[] the record built
+  // from it (its top-left sample per DS pixel) when the slot finishes.
+  std::vector<u32> native[4];
   double tick_ns = 0;
   VkFormat ds_format = VK_FORMAT_D24_UNORM_S8_UINT;
 
@@ -133,6 +139,12 @@ struct Lean::Impl {
 
 Lean::~Lean() { if (d_) d_->destroy(); }
 bool Lean::msaa() const { return d_->msaa; }
+u32 Lean::scale() const { return d_->scale; }
+const u32* Lean::hires_of(const u32* record) const {
+  if (d_->scale == 1 || !record) return nullptr;
+  for (u32 i = 0; i < Impl::kSlots; ++i) if (record == d_->native[i].data()) return static_cast<const u32*>(d_->out[i].ptr);
+  return nullptr;
+}
 GpuPoly* Lean::poly_buffer() { return d_->host_polys.data(); }
 GpuVert* Lean::vert_buffer() { return d_->host_verts.data(); }
 u32* Lean::texel_buffer(u32* cap) { if (cap) *cap = kTexelWords; return static_cast<u32*>(d_->texels.ptr); }
@@ -144,7 +156,7 @@ u32 Lean::draws() const { return d_->last_draws; }
 Lean::Stats Lean::stats(bool reset) { std::lock_guard<std::mutex> lk(d_->m); Stats s = d_->st; if (reset) d_->st = Stats{}; return s; }
 static double now_ms() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
-std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
+std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, u32 scale, std::string* why) {
   auto fail_null = [&](const char* m) { if (why) *why = m; return nullptr; };
   const DeviceInternal* vk = dev.internal();
   if (!vk || !vk->api) return fail_null("no Vulkan context");
@@ -154,6 +166,8 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
   self->d_ = std::make_unique<Impl>();
   Impl& d = *self->d_;
   d.vk = vk; d.api = &a; d.dev = &dev;
+  d.scale = std::clamp<u32>(scale, 1, 8);
+  const u32 SW = W * d.scale, SH = H * d.scale;   // the drawn picture's size
   auto fail = [&](const char* m) { if (why) *why = m; return nullptr; };
   d.msaa = msaa && dev.limits().msaa4 && !(std::getenv("DS_LEAN_MSAA") && std::atoi(std::getenv("DS_LEAN_MSAA")) == 0);   // DS_LEAN_MSAA=0: off regardless (debug)
   const VkSampleCountFlagBits samples = d.msaa ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT;
@@ -167,7 +181,8 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     d.polys[i] = dev.alloc(sizeof(GpuPoly) * DS_MAX_POLYS, Access::CpuWrite);
     d.verts[i] = dev.alloc(sizeof(GpuVert) * DS_MAX_VERTS, Access::CpuWrite);
     d.post[i] = dev.alloc(sizeof(GpuPost), Access::CpuWrite);
-    d.out[i] = dev.alloc(sizeof(u32) * W * H, Access::CpuRead);
+    d.out[i] = dev.alloc(sizeof(u32) * SW * SH, Access::CpuRead);
+    if (d.scale > 1) d.native[i].assign(W * H, 0);
     if (!d.polys[i] || !d.verts[i] || !d.post[i] || !d.out[i]) return fail("buffer allocation");
   }
   {
@@ -226,7 +241,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
   // Images.
   VkPhysicalDeviceMemoryProperties mp{}; a.vkGetPhysicalDeviceMemoryProperties(vk->phys, &mp);
   auto make_image = [&](VkFormat fmt, VkImageUsageFlags usage, VkImageAspectFlags aspect, Impl::Img& o, VkSampleCountFlagBits smp) {
-    VkImageCreateInfo ii{}; ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; ii.imageType = VK_IMAGE_TYPE_2D; ii.format = fmt; ii.extent = {W, H, 1};
+    VkImageCreateInfo ii{}; ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; ii.imageType = VK_IMAGE_TYPE_2D; ii.format = fmt; ii.extent = {SW, SH, 1};
     ii.mipLevels = 1; ii.arrayLayers = 1; ii.samples = smp; ii.tiling = VK_IMAGE_TILING_OPTIMAL; ii.usage = usage;
     ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (a.vkCreateImage(vk->dev, &ii, nullptr, &o.img) != VK_SUCCESS) return false;
@@ -295,7 +310,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     VkRenderPassCreateInfo rpi{}; rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO; rpi.attachmentCount = 4; rpi.pAttachments = at; rpi.subpassCount = 2; rpi.pSubpasses = sp; rpi.dependencyCount = 2; rpi.pDependencies = dep;
     if (a.vkCreateRenderPass(vk->dev, &rpi, nullptr, &d.rp) != VK_SUCCESS) return fail("render pass");
     VkImageView views[4] = {d.col_ms.view, d.ds_ms.view, d.res.view, d.fog_ms.view};
-    VkFramebufferCreateInfo fbi{}; fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbi.renderPass = d.rp; fbi.attachmentCount = 4; fbi.pAttachments = views; fbi.width = W; fbi.height = H; fbi.layers = 1;
+    VkFramebufferCreateInfo fbi{}; fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbi.renderPass = d.rp; fbi.attachmentCount = 4; fbi.pAttachments = views; fbi.width = SW; fbi.height = SH; fbi.layers = 1;
     if (a.vkCreateFramebuffer(vk->dev, &fbi, nullptr, &d.fb) != VK_SUCCESS) return fail("framebuffer");
   }
 
@@ -310,7 +325,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     const bool stencil_only = kind == P_MASK_CLEAR || kind == P_SHADOW_PREP;
     VkPipelineVertexInputStateCreateInfo vin{}; vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     VkPipelineInputAssemblyStateCreateInfo ia{}; ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    VkViewport vp{0.f, 0.f, static_cast<float>(W), static_cast<float>(H), 0.f, 1.f}; VkRect2D sc{{0, 0}, {W, H}};
+    VkViewport vp{0.f, 0.f, static_cast<float>(SW), static_cast<float>(SH), 0.f, 1.f}; VkRect2D sc{{0, 0}, {SW, SH}};
     VkPipelineViewportStateCreateInfo vps{}; vps.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO; vps.viewportCount = 1; vps.pViewports = &vp; vps.scissorCount = 1; vps.pScissors = &sc;
     VkPipelineRasterizationStateCreateInfo rs{}; rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO; rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE; rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.f;
     VkPipelineMultisampleStateCreateInfo ms{}; ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO; ms.rasterizationSamples = samples;
@@ -371,7 +386,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = d.mod_res; st[1].pName = "main";
     VkPipelineVertexInputStateCreateInfo vin{}; vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     VkPipelineInputAssemblyStateCreateInfo ia{}; ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    VkViewport vp{0.f, 0.f, static_cast<float>(W), static_cast<float>(H), 0.f, 1.f}; VkRect2D sc{{0, 0}, {W, H}};
+    VkViewport vp{0.f, 0.f, static_cast<float>(SW), static_cast<float>(SH), 0.f, 1.f}; VkRect2D sc{{0, 0}, {SW, SH}};
     VkPipelineViewportStateCreateInfo vps{}; vps.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO; vps.viewportCount = 1; vps.pViewports = &vp; vps.scissorCount = 1; vps.pScissors = &sc;
     VkPipelineRasterizationStateCreateInfo rs{}; rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO; rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE; rs.lineWidth = 1.f;
     VkPipelineMultisampleStateCreateInfo ms{}; ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
@@ -399,7 +414,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     }
   }
   self->ready_ = true;
-  std::fprintf(stderr, "gpu lean: 1x%s, %s depth/stencil\n", d.msaa ? " with 4x MSAA" : " (no MSAA)", d.ds_format == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8");
+  std::fprintf(stderr, "gpu lean: %ux%s, %s depth/stencil\n", d.scale, d.msaa ? " with 4x MSAA" : " (no MSAA)", d.ds_format == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8");
   return self;
 }
 
@@ -425,6 +440,8 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   d.dev->flush(d.post[slot], 0, sizeof(GpuPost));
 
   GpuFrame f = fin;
+  f.scale = d.scale;
+  const u32 SW = W * d.scale, SH = H * d.scale;
   const bool wbuf = (f.flags & DS_FF_WBUFFER) != 0;
   GpuPoly* gpw = d.host_polys.data();
   const GpuPoly* gp = gpw;
@@ -472,7 +489,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     cv[1].depthStencil.stencil = ca ? (S_DRAWN | code[(f.clear_attr >> 24) & 0x3F]) : 0;
     cv[3].color.float32[0] = (f.clear_attr & 0x8000) ? 1.f : 0.f;   // the rear plane's fog bit
   }
-  VkRenderPassBeginInfo rbi{}; rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; rbi.renderPass = d.rp; rbi.framebuffer = d.fb; rbi.renderArea = {{0, 0}, {W, H}}; rbi.clearValueCount = 4; rbi.pClearValues = cv;
+  VkRenderPassBeginInfo rbi{}; rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; rbi.renderPass = d.rp; rbi.framebuffer = d.fb; rbi.renderArea = {{0, 0}, {SW, SH}}; rbi.clearValueCount = 4; rbi.pClearValues = cv;
   a.vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
   a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout, 0, 1, &d.set[slot], 0, nullptr);
   a.vkCmdPushConstants(cb, d.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(GpuFrame), &f);
@@ -560,7 +577,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   a.vkCmdDraw(cb, 3, 1, 0, 0);
   a.vkCmdEndRenderPass(cb);
   // The record to the CPU-readable buffer.
-  VkBufferImageCopy rg{}; rg.bufferRowLength = W; rg.bufferImageHeight = H; rg.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}; rg.imageExtent = {W, H, 1};
+  VkBufferImageCopy rg{}; rg.bufferRowLength = SW; rg.bufferImageHeight = SH; rg.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}; rg.imageExtent = {SW, SH, 1};
   a.vkCmdCopyImageToBuffer(cb, d.res.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk_buf(d.out[slot]), 1, &rg);
   VkMemoryBarrier mb{}; mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER; mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
   a.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
@@ -587,7 +604,17 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
 static void finish_slot(Lean::Impl& d, u32 slot) {
   const Api& a = *d.api;
   d.fence_live[slot] = false;
-  d.dev->invalidate(d.out[slot], 0, sizeof(u32) * W * H);
+  d.dev->invalidate(d.out[slot], 0, sizeof(u32) * W * H * d.scale * d.scale);
+  if (d.scale > 1) {
+    // The record: each DS pixel's top-left sample, the one evaluated at the
+    // pixel's own corner (the DS's sampling point), so the compositor and
+    // capture see what a 1x raster would have drawn there.
+    const u32* src = static_cast<const u32*>(d.out[slot].ptr);
+    u32* dst = d.native[slot].data();
+    const u32 step = d.scale, pitch = W * d.scale * d.scale;
+    for (u32 y = 0; y < H; ++y, src += pitch)
+      for (u32 x = 0; x < W; ++x) dst[y * W + x] = src[x * step];
+  }
   d.valid[slot] = true;
   if (d.timing) {
     u64 t[2] = {0, 0};
@@ -622,15 +649,16 @@ const u32* Lean::newest_ready(bool allow_lag) {
   const u32 newest = static_cast<u32>((d.gen - 1) % Impl::kSlots);
   if (d.asked_gen != d.gen) { d.asked_gen = d.gen; d.st.gap_ms += now_ms() - d.submit_at[newest]; ++d.st.gap_n; }
   if (d.fence_live[newest] && a.vkGetFenceStatus(d.vk->dev, d.fence[newest]) == VK_SUCCESS) finish_slot(d, newest);
-  if (!d.fence_live[newest]) { ++d.st.newest; return static_cast<const u32*>(d.out[newest].ptr); }
+  auto record = [&](u32 slot) { return d.scale > 1 ? d.native[slot].data() : static_cast<const u32*>(d.out[slot].ptr); };
+  if (!d.fence_live[newest]) { ++d.st.newest; return record(newest); }
   if (allow_lag && d.gen >= 2) {
     const u32 prev = static_cast<u32>((d.gen - 2) % Impl::kSlots);
     if (d.fence_live[prev] && a.vkGetFenceStatus(d.vk->dev, d.fence[prev]) == VK_SUCCESS) finish_slot(d, prev);
-    if (!d.fence_live[prev] && d.valid[prev]) { ++d.st.lagged; return static_cast<const u32*>(d.out[prev].ptr); }
+    if (!d.fence_live[prev] && d.valid[prev]) { ++d.st.lagged; return record(prev); }
   }
   if (allow_lag) ++d.st.stalled; else ++d.st.nolag;
   wait_locked(d);
-  return static_cast<const u32*>(d.out[newest].ptr);
+  return record(newest);
 }
 
 } // namespace ds::gpu::vk

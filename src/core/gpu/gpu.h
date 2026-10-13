@@ -92,6 +92,23 @@ public:
   // once shown again. Engine A never skips. Set between frames only.
   void set_screen_visible(int screen, bool on) { screen_visible_[screen] = on; }
 
+  // High-resolution 3D compositing, for a frontend that draws the 3D layer
+  // at the GPU raster's internal resolution (Renderer3D::set_gpu_scale). Each
+  // finished frame publishes engine A's per-pixel HiresMode words
+  // (engine2d.h), a word per line, and the frame's scaled 3D picture; the
+  // frontend copies what it needs before the next run_frame. Off by default
+  // (costs a full layer select on engine A's 3D lines).
+  struct Hires {
+    const u32* layer3d = nullptr;   // the frame's 3D layer at `scale` x (256*scale wide), or null
+    u32 scale = 1;
+    std::vector<u32> desc, operand; // 192 x 256 each
+    // Per line: bit 0 the line shows the composite with 3D in it, bit 1 the
+    // screen engine A was on (POWCNT1 bit 15), bits 16-31 MASTER_BRIGHT.
+    std::array<u32, SCREEN_H> line{};
+  };
+  void set_hires(bool on);
+  const Hires& hires() const { return hires_; }
+
   // Frameskip (frontend policy). A skipped frame runs unchanged, only
   // omitting line rendering/output and the 3D raster feeding it. Decided one
   // frame ahead, at line 215. Never skips a frame that captures or feeds the FIFO.
@@ -345,6 +362,8 @@ private:
   bool bscale_defer_ = false;           // output_engine stashes engine B's line instead of scaling it
   bool scale_inflight_ = false;         // the worker holds a stash to scale
   Renderer3D::FrameRef ref3d_;          // the 3D frame these display lines read (begin_frame)
+  Hires hires_;
+  bool hires_on_ = false;
   // Lag mode: per-line frames hand BOTH engines' line to the
   // worker at its HBlank without waiting, joining at that line's HBlank or
   // earlier if observed. The last display line always joins. Past

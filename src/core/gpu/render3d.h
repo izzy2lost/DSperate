@@ -79,6 +79,10 @@ public:
   // May decline (no Vulkan); `why` takes the reason. Coordinator only.
   bool set_gpu(bool on, std::string* why = nullptr);
   bool gpu_active() const { return gpu_on_; }
+  // Internal resolution of the GPU raster (1-8; the CPU raster is always 1x).
+  // Takes effect at the next frame, like the AA setting. Coordinator only.
+  void set_gpu_scale(u32 scale) { gpu_scale_ = scale < 1 ? 1 : scale > 8 ? 8 : scale; }
+  u32 gpu_scale() const { return gpu_scale_; }
 private:
   NDS& nds_;
   // Holds a whole chunk of scanlines at once (render_chunk draws chunk at a
@@ -370,6 +374,10 @@ public:
     // ref is taken at the start of the display frame: the GPU gets the lines
     // before the compositor's batch as well (see sync_line).
     mutable const u32* out = nullptr;
+    // The same frame drawn at `hi_scale` x (a GPU raster above 1x), picked
+    // with `out`; null when the frame has no such picture (1x, CPU-drawn).
+    mutable const u32* hi = nullptr;
+    mutable u32 hi_scale = 1;
     bool gpu = false, allow_lag = true;
     u64 gen = 0;
     u32 nbins = 0;
@@ -405,6 +413,7 @@ private:
   std::unique_ptr<vk::Lean> lean_;
   std::unique_ptr<vk::Lean> lean_retired_;   // the Lean gpu_rebuild() replaced, kept one frame for readers of its record
   bool lean_aa_ = false;   // the AA setting lean_ was created for (msaa() is what the device granted)
+  u32 gpu_scale_ = 1;      // the internal resolution asked for; lean_->scale() is the one it has
   void gpu_rebuild();
   // The GPU submit (command recording + queue call, ~0.9 ms) runs on its own
   // thread, off the emulation thread: gpu_submit() fills the staging buffers

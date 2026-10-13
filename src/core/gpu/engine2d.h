@@ -23,6 +23,21 @@ enum LayerId : u8 { L_BG0 = 0x01, L_BG1 = 0x02, L_BG2 = 0x04, L_BG3 = 0x08, L_OB
 
 enum PixelKind : u8 { K_NORMAL = 0, K_OBJ_SEMI = 1, K_OBJ_BITMAP = 2, K_3D = 3 };
 
+// High-resolution 3D compositing (engine A, Gpu::set_hires). For each pixel
+// the 3D layer shows through, how the line's final colour came from it, so a
+// frontend can redo that last step over a 3D picture drawn at a higher
+// resolution. Word layout: mode in bits 0-2, EVA 3-7, EVB 8-12, EVY 13-17;
+// the other operand's 18-bit colour beside it in a second word.
+enum HiresMode : u8 {
+  HM_NONE = 0,      // no 3D in this pixel: the native colour stands
+  HM_3D = 1,        // the 3D pixel as is (operand: the layer beneath, for an undrawn sample)
+  HM_3D_ALPHA = 2,  // the 3D pixel blended over the operand by its own alpha (the 3D/2D blend)
+  HM_3D_BLEND = 3,  // the 3D pixel EVA, the operand EVB (BLDCNT blend, 3D first target)
+  HM_3D_BRIGHT = 4, // the 3D pixel brightened by EVY
+  HM_3D_DARK = 5,   // the 3D pixel darkened by EVY
+  HM_OVER_3D = 6,   // the operand (a layer above) EVA over the 3D pixel EVB
+};
+
 constexpr u8 OA_PRIO = 0x03, OA_SEMI = 0x04, OA_BITMAP = 0x08, OA_MOSAIC = 0x10, OA_TOUCHED = 0x20, OA_STDPAL = 0x40, OA_OPAQUE = 0x80;
 
 // Layer line value: bit 15 opaque; palette index (bits 0-11), RGB555, or (3D) x position.
@@ -76,6 +91,11 @@ public:
 
   // Engine A: 256 RGB666 with 5-bit alpha in bits 24-28 (0 = transparent), or null.
   void set_3d_line(const Pixel* line) { line3d_ = line; }
+  // Engine A only: write each line's HiresMode words to desc/operand rows
+  // (192 x 256 each); null turns it off. hires_line_has_3d() tells the
+  // output stage whether the last rendered line had any.
+  void set_hires_target(u32* desc, u32* operand) { hires_desc_ = desc; hires_operand_ = operand; }
+  bool hires_line_has_3d() const { return hires_has3d_; }
 
   u32 bldcnt() const { return regs_.bldcnt(); }
   u32 eva() const { return regs_.eva(); }
@@ -139,6 +159,12 @@ private:
   alignas(16) std::array<u8, 256> top_id_{}, top_kind_{}, top_alpha_{}, second_id_{};
   alignas(16) std::array<Pixel, 256> out_{};
   const Pixel* line3d_ = nullptr;
+  u32* hires_desc_ = nullptr;
+  u32* hires_operand_ = nullptr;
+  bool hires_has3d_ = false;
+  bool line_3d_drawn_ = false;   // this line's 3D layer had pixels (set by draw_bg_3d)
+  void render_line_composite(u32 line);
+  void emit_hires(u32 line);
 
   const VramMap& vram() const;
   const VramMap* vm_override_ = nullptr;

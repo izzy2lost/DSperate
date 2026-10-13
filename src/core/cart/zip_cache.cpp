@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
+#include <fcntl.h>
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
@@ -182,10 +183,18 @@ std::string zip_cache_path(const std::string& zip_path, const std::string& dir_o
 }
 
 std::unique_ptr<RomSource> open_zip(const std::string& path, ZipOpen& how, std::string& err) {
+  const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) { err = std::strerror(errno); how.chosen.clear(); how.cache_path.clear(); how.extracted = false; return nullptr; }
+  std::unique_ptr<RomSource> s = open_zip_fd(fd, path, how, err);
+  close(fd);
+  return s;
+}
+
+std::unique_ptr<RomSource> open_zip_fd(int fd, const std::string& path, ZipOpen& how, std::string& err) {
   err.clear();
   how.chosen.clear(); how.cache_path.clear(); how.extracted = false;
 
-  std::unique_ptr<RomSource> archive = RomSource::map_file(path, err);
+  std::unique_ptr<RomSource> archive = RomSource::map_fd(fd, 0, 0, err);
   if (!archive) return nullptr;
   // RomSource pads to a page; the parser only reads inside `size`.
   const u8* zip = archive->page(0);
@@ -197,11 +206,11 @@ std::unique_ptr<RomSource> open_zip(const std::string& path, ZipOpen& how, std::
   how.chosen = e.name;
 
   if (e.stored()) {
-    return RomSource::map_file(path, e.data_off, e.usize, err);
+    return RomSource::map_fd(fd, e.data_off, e.usize, err);
   }
 
   struct stat zst{};
-  if (stat(path.c_str(), &zst) != 0) { err = std::strerror(errno); return nullptr; }
+  if (fstat(fd, &zst) != 0) { err = std::strerror(errno); return nullptr; }
   const std::string tag = make_tag(canonical(path), zst, e);
 
   std::string image;

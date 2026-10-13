@@ -12,7 +12,10 @@
 #include "core/bios/freebios.h"
 #include "core/cart/zip_cache.h"
 
+#include <cerrno>
 #include <cstdio>
+#include <fcntl.h>
+#include <unistd.h>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -292,15 +295,18 @@ namespace { u64 rom_identity(const cart::RomSource& rom) {
 } // namespace
 
 bool NDS::load_rom(const std::string& path) {
+  const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) { std::fprintf(stderr, "rom: %s: %s\n", path.c_str(), std::strerror(errno)); return false; }
+  const bool ok = load_rom_fd(fd, path);
+  close(fd);
+  return ok;
+}
+
+bool NDS::load_rom_fd(int fd, const std::string& path) {
   // A zipped ROM comes out the same as a loose one from here on (rom_id is
   // hashed from the decompressed bytes). Sniffed by magic, not extension.
-  bool zipped = false;
-  {
-    std::ifstream f(path, std::ios::binary);
-    u8 magic[4] = {};
-    f.read(reinterpret_cast<char*>(magic), 4);
-    zipped = f.gcount() == 4 && cart::is_zip(magic, 4);
-  }
+  u8 magic[4] = {};
+  const bool zipped = pread(fd, magic, 4, 0) == 4 && cart::is_zip(magic, 4);
   rom_zip_entry.clear();
   rom_cache_path.clear();
   // A loose .nds is mapped and a zip goes through the cache beside it
@@ -313,18 +319,23 @@ bool NDS::load_rom(const std::string& path) {
     how.max_bytes = rom_cache_max_bytes;
     how.progress = rom_progress; how.progress_user = rom_progress_user;
     how.cancel = rom_cancel;
-    src = cart::open_zip(path, how, err);
+    src = cart::open_zip_fd(fd, path, how, err);
     rom_zip_entry = how.chosen;
     rom_cache_path = how.cache_path;
   } else {
-    src = cart::RomSource::map_file(path, err);
+    src = cart::RomSource::map_fd(fd, 0, 0, err);
   }
   if (src) return load_rom_source(std::move(src));
   std::fprintf(stderr, "rom: %s: %s\n", path.c_str(), err.c_str());
   if (err.compare(0, 6, "mmap: ") != 0) return false;
   // A filesystem that can't map: read (and unzip) the whole ROM into memory.
   std::fprintf(stderr, "rom: loading into memory instead\n");
-  std::vector<u8> image = slurp(path);
+  std::vector<u8> image;
+  {
+    u8 buf[1 << 16];
+    off_t at = 0;
+    for (ssize_t got; (got = pread(fd, buf, sizeof buf, at)) > 0; at += got) image.insert(image.end(), buf, buf + got);
+  }
   if (zipped) {
     std::vector<u8> rom;
     std::string chosen;

@@ -482,6 +482,8 @@ void Gpu::on_scanline_start() {
   if (line_ == 0) {
     // All display lines must be drawn before the frontend reads them and before begin_frame runs.
     { prof::Scope j(prof::JOIN0); join_worker(JoinSite::Line0); }
+    // The finished frame's scaled 3D picture, before begin_frame takes the next frame's ref.
+    if (hires_on_) { hires_.layer3d = ref3d_.hi; hires_.scale = ref3d_.hi ? ref3d_.hi_scale : 1; }
     if (probe_enabled_) async_probe_check(true);
     { prof::Scope b(prof::BEGIN_FRAME); begin_frame(); }
     nds_.frame_ready = true;
@@ -808,6 +810,10 @@ void Gpu::output_engine(int e, u32 line) {
   prof::Scope sc(prof::OUTPUT, e == 0);
   const Engine2D& en = engine[e];
   const int screen = en.screen();
+  if (e == 0 && hires_on_) {
+    const bool composite = screens_on_ && ((en.dispcnt() >> 16) & 3) == 1;
+    hires_.line[line] = (composite && en.hires_line_has_3d() ? 1u : 0u) | (screen ? 2u : 0u) | (static_cast<u32>(en.master_bright()) << 16);
+  }
   const bool scaled = scaling();
   u32* dst = scaled ? line_out_[e].data() : fb_[screen].data() + line * SCREEN_W;
   if (screens_on_) {
@@ -1160,6 +1166,19 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
   for (u32 y = stage ? yfirst : yfirst + 1; y < y1; ++y)
     if (row_kept(t, y)) std::memcpy(row_at(t, y), row, bytes);
   if (seam && row_kept(t, y0)) kern::active::scale_row_grid(src, t.xrun, t.grid, min_run, pitch_x, true, row_at(t, y0));
+}
+
+void Gpu::set_hires(bool on) {
+  hires_on_ = on;
+  if (on) {
+    hires_.desc.assign(SCREEN_W * SCREEN_H, 0);
+    hires_.operand.assign(SCREEN_W * SCREEN_H, 0);
+    hires_.line.fill(0);
+    engine[0].set_hires_target(hires_.desc.data(), hires_.operand.data());
+  } else {
+    engine[0].set_hires_target(nullptr, nullptr);
+    hires_ = Hires{};
+  }
 }
 
 void Gpu::output_a(u32 line, u32* dst) {

@@ -112,6 +112,22 @@ typedef gchar **GStrv;
 #define G_BYTE_ORDER G_LITTLE_ENDIAN
 #endif
 
+/* stream.c's (state save) big-endian accessors. GCC lets the undeclared
+ * calls through as implicit declarations; clang (the Android NDK) refuses. */
+#if G_BYTE_ORDER == G_BIG_ENDIAN
+#define GUINT16_TO_BE(v) ((guint16)(v))
+#define GUINT32_TO_BE(v) ((guint32)(v))
+#else
+#define GUINT16_TO_BE(v) ((guint16)__builtin_bswap16((guint16)(v)))
+#define GUINT32_TO_BE(v) ((guint32)__builtin_bswap32((guint32)(v)))
+#endif
+#define GUINT16_FROM_BE(v) GUINT16_TO_BE(v)
+#define GUINT32_FROM_BE(v) GUINT32_TO_BE(v)
+#define GINT16_TO_BE(v) ((gint16)GUINT16_TO_BE((guint16)(v)))
+#define GINT32_TO_BE(v) ((gint32)GUINT32_TO_BE((guint32)(v)))
+#define GINT16_FROM_BE(v) GINT16_TO_BE(v)
+#define GINT32_FROM_BE(v) GINT32_TO_BE(v)
+
 #if !defined(_WIN32)
 #define G_OS_UNIX 1
 #endif

@@ -37,6 +37,10 @@ struct ZipOpen {
 
 // Opens `path` (an archive) as a RomSource. Null with a reason in `err`.
 std::unique_ptr<RomSource> open_zip(const std::string& path, ZipOpen& how, std::string& err);
+// The same from a descriptor the caller keeps. `path` still names the archive:
+// the cached image is kept beside it (or in fallback_dir) under its stem, and
+// the sweep keeps the image only while `path` exists.
+std::unique_ptr<RomSource> open_zip_fd(int fd, const std::string& path, ZipOpen& how, std::string& err);
 
 // Where open_zip would put (or find) the extracted image for `path`.
 std::string zip_cache_path(const std::string& zip_path, const std::string& dir_override = {});

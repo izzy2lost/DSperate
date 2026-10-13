@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ninds_primary">#FFB4A9</color>
+    <color name="ninds_on_primary">#690002</color>
+    <color name="ninds_primary_container">#93000A</color>
+    <color name="ninds_on_primary_container">#FFDAD5</color>
+    <color name="ninds_secondary">#C4C6CF</color>
+    <color name="ninds_background">#121316</color>
+    <color name="ninds_surface">#1A1B1F</color>
+    <color name="ninds_card">#22242A</color>
+</resources>

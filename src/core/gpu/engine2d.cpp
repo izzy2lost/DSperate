@@ -144,6 +144,57 @@ void Engine2D::debug_outhash(u32 line) {
 }
 
 void Engine2D::render_line(u32 line) {
+  line_3d_drawn_ = false;
+  render_line_composite(line);
+  if (hires_desc_) emit_hires(line);
+}
+
+// The line's HiresMode words, mirroring composite_line's rules over a fresh
+// full selection (the line's own composite may have taken a path that kept
+// no second layer). Only lines whose 3D layer drew anything pay for it.
+void Engine2D::emit_hires(u32 line) {
+  u32* desc = hires_desc_ + line * 256;
+  u32* operand = hires_operand_ + line * 256;
+  hires_has3d_ = false;
+  if (num_ || !line_3d_drawn_ || !(cur_.dispcnt & 8)) return;
+  select_layers();
+  const u32 bldcnt = cur_.bldcnt, effect = (bldcnt >> 6) & 3;
+  const u32 eva = cur_.eva, evb = cur_.evb, evy = cur_.evy;
+  auto word = [](u32 mode, u32 a, u32 b, u32 y) { return mode | (a << 3) | (b << 8) | (y << 13); };
+  bool any = false;
+  for (u32 i = 0; i < 256; ++i) {
+    const bool top3d = top_tid_[i] == T_BG0, sec3d = second_tid_[i] == T_BG0;
+    if (!top3d && !sec3d) { desc[i] = HM_NONE; continue; }
+    const u32 t1 = top_id_[i], t2 = static_cast<u32>(second_id_[i]) << 8;
+    const u8 kind = top_kind_[i];
+    u32 d = HM_NONE, op = 0;
+    if ((kind == K_OBJ_SEMI || kind == K_OBJ_BITMAP) && (bldcnt & t2)) {
+      const u32 ea = (kind == K_OBJ_BITMAP) ? top_alpha_[i] : eva;
+      const u32 eb = (kind == K_OBJ_BITMAP) ? 16 - ea : evb;
+      if (sec3d) { d = word(HM_OVER_3D, ea, eb, 0); op = top_[i]; }
+    } else if (kind == K_3D && (bldcnt & t2)) {
+      d = HM_3D_ALPHA; op = second_[i];
+    } else if ((bldcnt & t1) && (win_[i] & 0x20)) {
+      switch (effect) {
+      case 1:
+        if (bldcnt & t2) {
+          if (top3d) { d = word(HM_3D_BLEND, eva, evb, 0); op = second_[i]; }
+          else if (sec3d) { d = word(HM_OVER_3D, eva, evb, 0); op = top_[i]; }
+        } else if (top3d) { d = HM_3D; op = second_[i]; }
+        break;
+      case 2: if (top3d) { d = word(HM_3D_BRIGHT, 0, 0, evy); op = second_[i]; } break;
+      case 3: if (top3d) { d = word(HM_3D_DARK, 0, 0, evy); op = second_[i]; } break;
+      default: if (top3d) { d = HM_3D; op = second_[i]; } break;
+      }
+    } else if (top3d) { d = HM_3D; op = second_[i]; }
+    desc[i] = d;
+    operand[i] = op & 0x00FFFFFF;
+    any |= d != HM_NONE;
+  }
+  hires_has3d_ = any;
+}
+
+void Engine2D::render_line_composite(u32 line) {
   struct AtExit { Engine2D* e; u32 line; ~AtExit() { if (g_outhash_on) e->debug_outhash(line); } } at_exit{this, line};
   cur_ = regs_.begin_line();
   if (!cur_.enabled) {
@@ -177,7 +228,7 @@ void Engine2D::render_line(u32 line) {
   case 7: if (bg_on(0)) draw_bg_text(line, 0); if (bg_on(1)) draw_bg_text(line, 1); break;
   }
   // BG0 is the 3D layer on engine A when DISPCNT bit 3 is set (modes 0-5, 7; mode 6 has no text BG0).
-  if (!num_ && (cur_.dispcnt & 8) && bg_on(0)) draw_bg_3d();
+  if (!num_ && (cur_.dispcnt & 8) && bg_on(0)) { draw_bg_3d(); line_3d_drawn_ = bg_[0].any; }
   }
 
   // 2. Window plane, 3. sprite X mosaic, 4. priority select, 5. colour effects.

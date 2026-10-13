@@ -63,6 +63,9 @@ struct NDS {
   bool firmware_synthetic = false;   // the firmware was generated, not dumped (set by load_bios)
   bool can_boot_firmware() const { return bios_native && !firmware_synthetic; }
   bool load_rom(const std::string& path);
+  // The same from a descriptor the caller keeps; `path` names the ROM (a zip's
+  // unpacked copy is cached by it, see cart::open_zip_fd).
+  bool load_rom_fd(int fd, const std::string& path);
   // A ROM already in memory (frontend's built-in loader cart); same identity
   // hash as the path form, so saves/states key the same way.
   bool load_rom_image(std::vector<u8> image);

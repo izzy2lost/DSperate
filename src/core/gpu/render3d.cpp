@@ -1327,7 +1327,7 @@ void Renderer3D::span_texels(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const
   u32* col = sb.tcol + off; u32* alp = sb.talp + off;
   // Only the live groups of the pass plane (see live_runs): a dead group's
   // texels are never read, by the shader (which skips it too) or the resolve.
-  if (const GatherNFn g = reinterpret_cast<GatherNFn>(sh.gather4)) {
+  if (const GatherNFn g = reinterpret_cast<GatherNFn>(const_cast<void*>(sh.gather4))) {
     const prof::Counter c = sh.texels ? prof::C_TEX_FAST : (sh.fmt == 5 ? prof::C_TEX_SLOW_FMT5 : prof::C_TEX_FAST);
     live_runs(sb.pass + off, n, [&](u32 k, u32 len) {
       const u32 len4 = (len + 3) & ~3u;
@@ -2656,7 +2656,7 @@ void Renderer3D::gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npol
     s32 xmin = 0x7FFFFFFF, xmax = -0x7FFFFFFF;
     for (u32 j = 0; j < p.nverts; ++j) {
       const Vertex& v = gx.vertex(p.vtx[j]);
-      GpuVert d{}; d.sx = v.sx; d.sy = v.sy; d.z = p.z[j]; d.w = p.w[j]; d.r = v.fcol[0]; d.g = v.fcol[1]; d.b = v.fcol[2]; d.s = v.tex[0]; d.t = v.tex[1];
+      GpuVert d{}; d.sx = v.sx; d.sy = v.sy; d.fx = v.sx << 6; d.fy = v.sy << 6; d.z = p.z[j]; d.w = p.w[j]; d.r = v.fcol[0]; d.g = v.fcol[1]; d.b = v.fcol[2]; d.s = v.tex[0]; d.t = v.tex[1];
       gv.push_back(d);
       xmin = std::min(xmin, d.sx); xmax = std::max(xmax, d.sx);
     }
@@ -2774,7 +2774,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   texels_in_ = &poly_texels_;
   if (gpu_dump_path_ && nds_.frame_count == gpu_dump_frame_) gpu_dump(gx, polys, npoly);
   lean_retired_.reset();
-  if (gpu_on_ && lean_ && lean_aa_ != aa_) gpu_rebuild();
+  if (gpu_on_ && lean_ && (lean_aa_ != aa_ || lean_->scale() != gpu_scale_)) gpu_rebuild();
   if (gpu_on_ && gpu_submit(gx, polys, npoly)) { gpu_frame_ = true; pending_bands_ = 0; return; }
   gpu_frame_ = false;
   if (prof::enabled && !prep_done) { prof::add_timed(prof::R3D_PREP, prof::now_ns() - t_prep0); prep_done = true; }
@@ -2972,10 +2972,10 @@ void Renderer3D::set_aa(bool on) {
 void Renderer3D::gpu_rebuild() {
   sync_all(); gpu_job_wait(); lean_->wait_all();
   std::string why;
-  std::unique_ptr<vk::Lean> fresh = vk::Lean::create(*vk_dev_, aa_, &why);
+  std::unique_ptr<vk::Lean> fresh = vk::Lean::create(*vk_dev_, aa_, gpu_scale_, &why);
   lean_retired_ = std::move(lean_);
   if (!fresh || !fresh->ready()) {
-    std::fprintf(stderr, "gpu3d: rebuild for AA %s failed (%s), drawing on the CPU\n", aa_ ? "on" : "off", why.c_str());
+    std::fprintf(stderr, "gpu3d: rebuild for AA %s at %ux failed (%s), drawing on the CPU\n", aa_ ? "on" : "off", gpu_scale_, why.c_str());
     gpu_on_ = false;
     return;
   }
@@ -2989,7 +2989,7 @@ bool Renderer3D::set_gpu(bool on, std::string* why) {
   std::string reason;
   if (!vk_dev_) vk_dev_ = vk::Device::shared(&reason);
   if (!vk_dev_) { if (why) *why = reason; return false; }
-  if (!lean_) { lean_ = vk::Lean::create(*vk_dev_, aa_, &reason); lean_aa_ = aa_; }
+  if (!lean_) { lean_ = vk::Lean::create(*vk_dev_, aa_, gpu_scale_, &reason); lean_aa_ = aa_; }
   if (!lean_ || !lean_->ready()) { lean_.reset(); if (why) *why = reason; return false; }
   lean_->wait_all(); gpu_resident_.clear(); gpu_arena_top_ = 0;
   gpu_job_start();
@@ -3047,7 +3047,11 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
       const Vertex& v = gx.vertex(p.vtx[j]);
       GpuVert& d = gv[nv + j];
       d.sx = v.sx; d.sy = v.sy; d.z = p.z[j]; d.w = p.w[j]; d.r = v.fcol[0]; d.g = v.fcol[1]; d.b = v.fcol[2]; d.s = v.tex[0]; d.t = v.tex[1];
-      d.pad_[0] = d.pad_[1] = d.pad_[2] = 0;
+      // The sub-pixel position, if it agrees with the whole-pixel one (a
+      // state load leaves it stale until the vertex is transformed again).
+      const bool frac_ok = (v.fx >> 6) == v.sx && (v.fy >> 6) == v.sy;
+      d.fx = frac_ok ? v.fx : v.sx << 6; d.fy = frac_ok ? v.fy : v.sy << 6;
+      d.pad_ = 0;
       xmin = std::min(xmin, d.sx); xmax = std::max(xmax, d.sx);
     }
     o.xmin = xmin; o.xmax = xmax;
@@ -3112,6 +3116,8 @@ void Renderer3D::sync_line(const FrameRef& f, s32 y) {
       const double t0 = g_gpu_trace.on ? now_ms() : 0;
       gpu_job_wait();
       f.out = lean_ ? lean_->newest_ready(f.allow_lag) : nullptr;
+      f.hi = f.out ? lean_->hires_of(f.out) : nullptr;
+      f.hi_scale = f.hi ? lean_->scale() : 1;
       if (!f.out) f.out = out_[display_].data();   // a Lean with no frame yet: a stale picture, not a null read
       if (g_gpu_trace.on) { const double w = now_ms() - t0; g_gpu_trace.wait_ms += w; g_gpu_trace.wait_max = std::max(g_gpu_trace.wait_max, w); if (w > 0.2) ++g_gpu_trace.waited; }
     }

@@ -1,0 +1,304 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Defaults here must match the accessors in Settings.kt. -->
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <PreferenceCategory app:title="@string/pref_cat_emulation" app:iconSpaceReserved="false">
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="jit"
+            app:summary="@string/pref_jit_summary"
+            app:title="@string/pref_jit" />
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="fast_timing"
+            app:summary="@string/pref_fast_timing_summary"
+            app:title="@string/pref_fast_timing" />
+        <SwitchPreferenceCompat
+            app:defaultValue="false"
+            app:iconSpaceReserved="false"
+            app:key="gpu3d"
+            app:summary="@string/pref_gpu3d_summary"
+            app:title="@string/pref_gpu3d" />
+        <ListPreference
+            app:defaultValue="1"
+            app:entries="@array/gpu_scale_entries"
+            app:entryValues="@array/gpu_scale_values"
+            app:iconSpaceReserved="false"
+            app:key="gpu_scale"
+            app:title="@string/pref_gpu_scale"
+            app:useSimpleSummaryProvider="true" />
+        <SwitchPreferenceCompat
+            app:defaultValue="false"
+            app:iconSpaceReserved="false"
+            app:key="anti_aliasing"
+            app:summary="@string/pref_aa_summary"
+            app:title="@string/pref_aa" />
+        <ListPreference
+            app:defaultValue="-1"
+            app:entries="@array/frameskip_entries"
+            app:entryValues="@array/frameskip_values"
+            app:iconSpaceReserved="false"
+            app:key="frameskip"
+            app:title="@string/pref_frameskip"
+            app:useSimpleSummaryProvider="true" />
+        <ListPreference
+            app:defaultValue="3"
+            app:entries="@array/ff_entries"
+            app:entryValues="@array/ff_values"
+            app:iconSpaceReserved="false"
+            app:key="ff_speed"
+            app:title="@string/pref_ff_speed"
+            app:useSimpleSummaryProvider="true" />
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="ff_toggle"
+            app:summary="@string/pref_ff_toggle_summary"
+            app:title="@string/pref_ff_toggle" />
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="auto_save_state"
+            app:summary="@string/pref_auto_save_state_summary"
+            app:title="@string/pref_auto_save_state" />
+        <SwitchPreferenceCompat
+            app:defaultValue="false"
+            app:iconSpaceReserved="false"
+            app:key="firmware_boot"
+            app:summary="@string/pref_firmware_boot_summary"
+            app:title="@string/pref_firmware_boot" />
+        <SwitchPreferenceCompat
+            app:defaultValue="false"
+            app:iconSpaceReserved="false"
+            app:key="internet"
+            app:summary="@string/pref_internet_summary"
+            app:title="@string/pref_internet" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:selectable="false"
+            app:summary="@string/pref_restart_note" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="@string/pref_cat_video" app:iconSpaceReserved="false">
+        <ListPreference
+            app:defaultValue="vertical"
+            app:entries="@array/layout_entries"
+            app:entryValues="@array/layout_values"
+            app:iconSpaceReserved="false"
+            app:key="layout_portrait"
+            app:title="@string/pref_layout_portrait"
+            app:useSimpleSummaryProvider="true" />
+        <ListPreference
+            app:defaultValue="vertical"
+            app:entries="@array/layout_entries"
+            app:entryValues="@array/layout_values"
+            app:iconSpaceReserved="false"
+            app:key="layout_landscape"
+            app:title="@string/pref_layout_landscape"
+            app:useSimpleSummaryProvider="true" />
+        <SwitchPreferenceCompat
+            app:defaultValue="false"
+            app:iconSpaceReserved="false"
+            app:key="swap_screens"
+            app:title="@string/pref_swap" />
+        <ListPreference
+            app:defaultValue="2"
+            app:entries="@array/filter_entries"
+            app:entryValues="@array/filter_values"
+            app:iconSpaceReserved="false"
+            app:key="filter"
+            app:title="@string/pref_filter"
+            app:useSimpleSummaryProvider="true" />
+        <SwitchPreferenceCompat
+            app:defaultValue="false"
+            app:iconSpaceReserved="false"
+            app:key="integer_scale"
+            app:summary="@string/pref_integer_summary"
+            app:title="@string/pref_integer" />
+        <SeekBarPreference
+            android:max="48"
+            app:defaultValue="0"
+            app:iconSpaceReserved="false"
+            app:key="screen_gap"
+            app:showSeekBarValue="true"
+            app:title="@string/pref_gap" />
+        <ListPreference
+            app:defaultValue="sensor"
+            app:entries="@array/orientation_entries"
+            app:entryValues="@array/orientation_values"
+            app:iconSpaceReserved="false"
+            app:key="orientation"
+            app:title="@string/pref_orientation"
+            app:useSimpleSummaryProvider="true" />
+        <SwitchPreferenceCompat
+            app:defaultValue="false"
+            app:iconSpaceReserved="false"
+            app:key="show_fps"
+            app:title="@string/pref_show_fps" />
+        <ListPreference
+            app:defaultValue="system"
+            app:entries="@array/theme_entries"
+            app:entryValues="@array/theme_values"
+            app:iconSpaceReserved="false"
+            app:key="theme"
+            app:title="@string/pref_theme"
+            app:useSimpleSummaryProvider="true" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="@string/pref_cat_audio" app:iconSpaceReserved="false">
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="audio"
+            app:title="@string/pref_audio" />
+        <SeekBarPreference
+            android:max="100"
+            app:defaultValue="100"
+            app:iconSpaceReserved="false"
+            app:key="volume"
+            app:showSeekBarValue="true"
+            app:title="@string/pref_volume" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="@string/pref_cat_controls" app:iconSpaceReserved="false">
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="touch_controls"
+            app:title="@string/pref_touch_controls" />
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="hide_with_gamepad"
+            app:title="@string/pref_hide_with_gamepad" />
+        <SeekBarPreference
+            android:max="100"
+            app:defaultValue="55"
+            app:iconSpaceReserved="false"
+            app:key="controls_opacity"
+            app:min="10"
+            app:showSeekBarValue="true"
+            app:title="@string/pref_opacity" />
+        <SeekBarPreference
+            android:max="150"
+            app:defaultValue="100"
+            app:iconSpaceReserved="false"
+            app:key="controls_scale"
+            app:min="60"
+            app:showSeekBarValue="true"
+            app:title="@string/pref_scale" />
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="haptics"
+            app:title="@string/pref_haptics" />
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="stick_as_dpad"
+            app:title="@string/pref_stick_dpad" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="controller_mapping"
+            app:summary="@string/pref_controller_mapping_summary"
+            app:title="@string/pref_controller_mapping" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="@string/pref_cat_system" app:iconSpaceReserved="false">
+        <EditTextPreference
+            app:defaultValue="NinDS"
+            app:iconSpaceReserved="false"
+            app:key="nickname"
+            app:title="@string/pref_nickname"
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:defaultValue=""
+            app:iconSpaceReserved="false"
+            app:key="message"
+            app:title="@string/pref_message"
+            app:useSimpleSummaryProvider="true" />
+        <ListPreference
+            app:defaultValue="1"
+            app:entries="@array/month_entries"
+            app:entryValues="@array/month_values"
+            app:iconSpaceReserved="false"
+            app:key="birthday_month"
+            app:title="@string/pref_birthday_month"
+            app:useSimpleSummaryProvider="true" />
+        <SeekBarPreference
+            android:max="31"
+            app:defaultValue="1"
+            app:iconSpaceReserved="false"
+            app:key="birthday_day"
+            app:min="1"
+            app:showSeekBarValue="true"
+            app:title="@string/pref_birthday_day" />
+        <ListPreference
+            app:defaultValue="0"
+            app:entries="@array/colour_entries"
+            app:entryValues="@array/colour_values"
+            app:iconSpaceReserved="false"
+            app:key="colour"
+            app:title="@string/pref_colour"
+            app:useSimpleSummaryProvider="true" />
+        <ListPreference
+            app:defaultValue="1"
+            app:entries="@array/language_entries"
+            app:entryValues="@array/language_values"
+            app:iconSpaceReserved="false"
+            app:key="language"
+            app:title="@string/pref_language"
+            app:useSimpleSummaryProvider="true" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:selectable="false"
+            app:summary="@string/pref_system_note" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="@string/pref_cat_files" app:iconSpaceReserved="false">
+        <Preference
+            app:iconSpaceReserved="false"
+            app:selectable="false"
+            app:summary="@string/pref_bios_note" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="import_bios9"
+            app:title="@string/pref_bios9" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="import_bios7"
+            app:title="@string/pref_bios7" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="import_firmware"
+            app:title="@string/pref_firmware" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="clear_bios"
+            app:title="@string/pref_clear_bios" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="import_cheat_db"
+            app:title="@string/pref_cheat_db" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="rom_folder"
+            app:title="@string/pref_rom_folder" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="clear_cache"
+            app:summary="@string/pref_clear_cache_summary"
+            app:title="@string/pref_clear_cache" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="@string/pref_cat_about" app:iconSpaceReserved="false">
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="about"
+            app:selectable="false"
+            app:title="@string/pref_about" />
+    </PreferenceCategory>
+</PreferenceScreen>

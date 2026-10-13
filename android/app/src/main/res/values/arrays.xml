@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="layout_entries">
+        <item>Stacked</item>
+        <item>Side by side</item>
+        <item>Hybrid (large + small)</item>
+        <item>Top screen only</item>
+        <item>Bottom screen only</item>
+    </string-array>
+    <string-array name="layout_values" translatable="false">
+        <item>vertical</item>
+        <item>horizontal</item>
+        <item>hybrid</item>
+        <item>top</item>
+        <item>bottom</item>
+    </string-array>
+
+    <string-array name="gpu_scale_entries">
+        <item>Native (256×192)</item>
+        <item>2× (512×384)</item>
+        <item>3× (768×576)</item>
+        <item>4× (1024×768)</item>
+    </string-array>
+    <string-array name="gpu_scale_values" translatable="false">
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+        <item>4</item>
+    </string-array>
+
+    <string-array name="filter_entries">
+        <item>Sharp pixels (nearest)</item>
+        <item>Smooth (bilinear)</item>
+        <item>Sharp bilinear</item>
+        <item>LCD grid</item>
+        <item>xBRZ upscaler (smooths pixel art)</item>
+    </string-array>
+    <string-array name="filter_values" translatable="false">
+        <item>0</item>
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+        <item>4</item>
+    </string-array>
+
+    <string-array name="frameskip_entries">
+        <item>Off</item>
+        <item>Auto (only when running slow)</item>
+        <item>1 frame</item>
+        <item>2 frames</item>
+        <item>3 frames</item>
+        <item>4 frames</item>
+    </string-array>
+    <string-array name="frameskip_values" translatable="false">
+        <item>0</item>
+        <item>-1</item>
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+        <item>4</item>
+    </string-array>
+
+    <string-array name="ff_entries">
+        <item>2×</item>
+        <item>3×</item>
+        <item>4×</item>
+        <item>6×</item>
+        <item>8×</item>
+        <item>Unlimited</item>
+    </string-array>
+    <string-array name="ff_values" translatable="false">
+        <item>2</item>
+        <item>3</item>
+        <item>4</item>
+        <item>6</item>
+        <item>8</item>
+        <item>0</item>
+    </string-array>
+
+    <string-array name="orientation_entries">
+        <item>Follow the device</item>
+        <item>Landscape</item>
+        <item>Portrait</item>
+    </string-array>
+    <string-array name="orientation_values" translatable="false">
+        <item>sensor</item>
+        <item>landscape</item>
+        <item>portrait</item>
+    </string-array>
+
+    <string-array name="theme_entries">
+        <item>Follow the system</item>
+        <item>Light</item>
+        <item>Dark</item>
+    </string-array>
+    <string-array name="theme_values" translatable="false">
+        <item>system</item>
+        <item>light</item>
+        <item>dark</item>
+    </string-array>
+
+    <string-array name="month_entries">
+        <item>January</item>
+        <item>February</item>
+        <item>March</item>
+        <item>April</item>
+        <item>May</item>
+        <item>June</item>
+        <item>July</item>
+        <item>August</item>
+        <item>September</item>
+        <item>October</item>
+        <item>November</item>
+        <item>December</item>
+    </string-array>
+    <string-array name="month_values" translatable="false">
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+        <item>4</item>
+        <item>5</item>
+        <item>6</item>
+        <item>7</item>
+        <item>8</item>
+        <item>9</item>
+        <item>10</item>
+        <item>11</item>
+        <item>12</item>
+    </string-array>
+
+    <!-- The DS firmware's sixteen favourite colours, in its own order. -->
+    <string-array name="colour_entries">
+        <item>Grey</item>
+        <item>Brown</item>
+        <item>Red</item>
+        <item>Pink</item>
+        <item>Orange</item>
+        <item>Yellow</item>
+        <item>Lime</item>
+        <item>Green</item>
+        <item>Dark green</item>
+        <item>Sea green</item>
+        <item>Turquoise</item>
+        <item>Blue</item>
+        <item>Dark blue</item>
+        <item>Purple</item>
+        <item>Violet</item>
+        <item>Magenta</item>
+    </string-array>
+    <string-array name="colour_values" translatable="false">
+        <item>0</item>
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+        <item>4</item>
+        <item>5</item>
+        <item>6</item>
+        <item>7</item>
+        <item>8</item>
+        <item>9</item>
+        <item>10</item>
+        <item>11</item>
+        <item>12</item>
+        <item>13</item>
+        <item>14</item>
+        <item>15</item>
+    </string-array>
+
+    <string-array name="language_entries">
+        <item>Japanese</item>
+        <item>English</item>
+        <item>French</item>
+        <item>German</item>
+        <item>Italian</item>
+        <item>Spanish</item>
+    </string-array>
+    <string-array name="language_values" translatable="false">
+        <item>0</item>
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+        <item>4</item>
+        <item>5</item>
+    </string-array>
+</resources>

@@ -48,6 +48,9 @@ public:
   static std::unique_ptr<RomSource> map_file(const std::string& path, std::string& err) {
     return map_file(path, 0, 0, err);
   }
+  // The same from a descriptor the caller keeps (Android hands out ROMs as
+  // descriptors that cannot be reopened by path).
+  static std::unique_ptr<RomSource> map_fd(int fd, u64 offset, u64 size, std::string& err);
 
   u32 size() const { return size_; }          // bytes in the image
   u32 mask() const { return mask_; }          // padded power-of-two size minus one

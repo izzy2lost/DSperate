@@ -767,7 +767,7 @@ void scale_row_straddle(const u32* src, const u32* seam, const u8* w, const u16*
     const u32 cs = seam[s];
     switch (n) {
     case 1: dst[x] = cs; break;
-    case 2: vst1_u32(dst + x, uint32x2_t{c, cs}); break;
+    case 2: vst1_u32(dst + x, (uint32x2_t{c, cs})); break;
     case 3: vst1_u32(dst + x, vdup_n_u32(c)); dst[x + 2] = cs; break;
     default: {
       const u32 last = end - 1;
@@ -898,7 +898,7 @@ void scale_row_grid(const u32* src, const u16* xrun, u32 f, u32 min_run, u32 pit
       continue;
     }
     switch (n) {
-    case 2: vst1_u32(dst + x, uint32x2_t{cd, c}); break;
+    case 2: vst1_u32(dst + x, (uint32x2_t{cd, c})); break;
     case 3: dst[x] = cd; vst1_u32(dst + x + 1, vdup_n_u32(c)); break;
     default: {
       dst[x++] = cd;
