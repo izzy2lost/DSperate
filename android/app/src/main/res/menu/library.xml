@@ -8,6 +8,11 @@
         app:actionViewClass="androidx.appcompat.widget.SearchView"
         app:showAsAction="ifRoom|collapseActionView" />
     <item
+        android:id="@+id/action_view"
+        android:icon="@drawable/ic_covers"
+        android:title="@string/action_show_covers"
+        app:showAsAction="ifRoom" />
+    <item
         android:id="@+id/action_refresh"
         android:icon="@drawable/ic_refresh"
         android:title="@string/action_refresh"
@@ -20,6 +25,10 @@
     <item
         android:id="@+id/action_open_file"
         android:title="@string/action_open_file"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_download_covers"
+        android:title="@string/action_download_covers"
         app:showAsAction="never" />
     <item
         android:id="@+id/action_settings"

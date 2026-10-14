@@ -18,6 +18,7 @@ import androidx.core.view.updatePadding
 import androidx.recyclerview.widget.GridLayoutManager
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.izzy2lost.ninds.databinding.ActivityLibraryBinding
+import java.util.Locale
 import java.util.concurrent.Executors
 
 class LibraryActivity : AppCompatActivity() {
@@ -25,8 +26,14 @@ class LibraryActivity : AppCompatActivity() {
     private lateinit var settings: Settings
     private lateinit var library: GameLibrary
     private lateinit var paths: AppPaths
-    private val adapter = GameAdapter(::launch, ::showGameOptions)
+    private lateinit var covers: Covers
+    private lateinit var adapter: GameAdapter
     private val worker = Executors.newSingleThreadExecutor()
+    private val downloader = Executors.newSingleThreadExecutor()
+    private var titles: Map<String, String> = emptyMap()
+    private var downloading = false
+    /** Box art is fetched by itself once per visit; after that only when asked from the menu. */
+    private var autoDownloaded = false
     private var games: List<Game> = emptyList()
     private var query = ""
     private var scanning = false
@@ -89,6 +96,9 @@ class LibraryActivity : AppCompatActivity() {
         settings = Settings.get(this)
         library = GameLibrary(this)
         paths = AppPaths(this)
+        covers = Covers(this)
+        adapter = GameAdapter(covers, ::launch, ::showGameOptions)
+        adapter.showCovers = settings.libraryCovers
         binding = ActivityLibraryBinding.inflate(layoutInflater)
         setContentView(binding.root)
         setSupportActionBar(binding.toolbar)
@@ -101,8 +111,7 @@ class LibraryActivity : AppCompatActivity() {
             insets
         }
 
-        val span = maxOf(2, (resources.configuration.screenWidthDp / 170))
-        binding.gameList.layoutManager = GridLayoutManager(this, span)
+        binding.gameList.layoutManager = GridLayoutManager(this, spanCount())
         binding.gameList.adapter = adapter
         binding.refresh.setOnRefreshListener { rescan() }
         binding.chooseFolderButton.setOnClickListener { pickFolder.launch(initialFolder()) }
@@ -110,6 +119,10 @@ class LibraryActivity : AppCompatActivity() {
 
         games = library.cached()
         render()
+        worker.execute {
+            val t = covers.titles()
+            runOnUiThread { titles = t; render() }
+        }
         if (savedInstanceState == null && intent?.action == Intent.ACTION_VIEW) intent.data?.let(::addAndLaunch)
         else if (settings.romTreeUri.isNotEmpty() && games.isEmpty()) rescan()
     }
@@ -121,6 +134,7 @@ class LibraryActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         worker.shutdown()
+        downloader.shutdownNow()
         super.onDestroy()
     }
 
@@ -137,11 +151,64 @@ class LibraryActivity : AppCompatActivity() {
                 }
             })
         }
+        updateViewItem(menu.findItem(R.id.action_view))
         return true
+    }
+
+    private fun updateViewItem(item: MenuItem?) {
+        item ?: return
+        item.setIcon(if (adapter.showCovers) R.drawable.ic_icons else R.drawable.ic_covers)
+        item.setTitle(if (adapter.showCovers) R.string.action_show_icons else R.string.action_show_covers)
+    }
+
+    /** Covers are larger than banner icons, so they get narrower columns. */
+    private fun spanCount() = maxOf(2, resources.configuration.screenWidthDp / if (adapter.showCovers) 150 else 170)
+
+    private fun setShowCovers(show: Boolean) {
+        settings.libraryCovers = show
+        adapter.showCovers = show
+        (binding.gameList.layoutManager as GridLayoutManager).spanCount = spanCount()
+        invalidateOptionsMenu()
+        if (show) autoDownloadCovers()
+    }
+
+    /** Fetches the box art the library is missing, once per visit, while box art is shown. */
+    private fun autoDownloadCovers() {
+        if (autoDownloaded || !adapter.showCovers || games.isEmpty()) return
+        autoDownloaded = true
+        worker.execute {
+            val missing = games.map { it.gameCode }.filter { it.length == 4 && covers.coverFile(it) == null }
+            if (missing.isNotEmpty()) runOnUiThread { downloadCovers(missing, refresh = false, quiet = true) }
+        }
+    }
+
+    private fun downloadCovers(codes: List<String>, refresh: Boolean, quiet: Boolean) {
+        if (downloading) return
+        downloading = true
+        downloader.execute {
+            val result = runCatching {
+                covers.download(codes, refresh) { done, total ->
+                    runOnUiThread { if (!scanning) supportActionBar?.subtitle = getString(R.string.covers_progress, done, total) }
+                }
+            }
+            val t = covers.titles()
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                downloading = false
+                if (!scanning) supportActionBar?.subtitle = null
+                titles = t
+                adapter.coversChanged()
+                render()
+                result.onSuccess { if (!quiet) Toast.makeText(this, getString(R.string.covers_done, it.withCover, it.games), Toast.LENGTH_LONG).show() }
+                    .onFailure { if (!quiet) Toast.makeText(this, getString(R.string.covers_failed, it.message ?: ""), Toast.LENGTH_LONG).show() }
+            }
+        }
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean = when (item.itemId) {
         R.id.action_refresh -> { rescan(); true }
+        R.id.action_view -> { setShowCovers(!adapter.showCovers); true }
+        R.id.action_download_covers -> { downloadCovers(games.map { it.gameCode }, refresh = true, quiet = false); true }
         R.id.action_folder -> { pickFolder.launch(initialFolder()); true }
         R.id.action_open_file -> { openFile.launch(arrayOf("*/*")); true }
         R.id.action_settings -> { startActivity(Intent(this, SettingsActivity::class.java)); true }
@@ -149,10 +216,12 @@ class LibraryActivity : AppCompatActivity() {
     }
 
     private fun render() {
-        val shown = if (query.isBlank()) games else games.filter {
-            it.title.contains(query, true) || it.fileName.contains(query, true) || it.gameCode.contains(query, true)
-        }
-        adapter.submit(shown)
+        val shown = (if (query.isBlank()) games else games.filter {
+            it.title.contains(query, true) || it.fileName.contains(query, true) || it.gameCode.contains(query, true) ||
+                titles[it.gameCode]?.contains(query, true) == true
+        }).sortedBy { (titles[it.gameCode] ?: it.title).lowercase(Locale.ROOT) }
+        adapter.submit(shown, titles)
+        autoDownloadCovers()
         val noFolder = settings.romTreeUri.isEmpty()
         binding.emptyState.visibility = if (games.isEmpty() && !scanning) View.VISIBLE else View.GONE
         binding.emptyText.setText(if (noFolder) R.string.library_empty_no_folder else R.string.library_empty_no_games)
@@ -181,7 +250,7 @@ class LibraryActivity : AppCompatActivity() {
                 scanning = false
                 binding.refresh.isRefreshing = false
                 supportActionBar?.subtitle = null
-                result.onSuccess { games = it }
+                result.onSuccess { games = it; autoDownloaded = false }
                     .onFailure { Toast.makeText(this, getString(R.string.scan_failed, it.message ?: ""), Toast.LENGTH_LONG).show() }
                 render()
             }
@@ -211,7 +280,7 @@ class LibraryActivity : AppCompatActivity() {
         if (hasSave) options += R.string.game_export_save to { pendingSaveGame = game; exportSave.launch("${game.stem}.sav") }
         if (hasSave) options += R.string.game_delete_save to { confirmDeleteSave(game) }
         MaterialAlertDialogBuilder(this)
-            .setTitle(game.title)
+            .setTitle(adapter.titleOf(game))
             .setItems(options.map { getString(it.first) }.toTypedArray()) { _, which -> options[which].second() }
             .show()
     }
@@ -219,7 +288,7 @@ class LibraryActivity : AppCompatActivity() {
     private fun confirmDeleteSave(game: Game) {
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.game_delete_save)
-            .setMessage(getString(R.string.delete_save_confirm, game.title))
+            .setMessage(getString(R.string.delete_save_confirm, adapter.titleOf(game)))
             .setPositiveButton(R.string.delete) { _, _ ->
                 // Kept as .bak rather than gone: one tap should not cost a hundred hours.
                 val f = paths.savFile(game.stem)

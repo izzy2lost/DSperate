@@ -28,6 +28,12 @@
     <string name="save_exported">Save file exported</string>
     <string name="save_export_failed">Could not export the save file</string>
     <string name="delete">Delete</string>
+    <string name="action_show_covers">Show box art</string>
+    <string name="action_show_icons">Show icons</string>
+    <string name="action_download_covers">Download box art</string>
+    <string name="covers_progress">Box art %1$d of %2$d</string>
+    <string name="covers_done">Box art for %1$d of %2$d games</string>
+    <string name="covers_failed">Could not download box art: %1$s</string>
 
     <!-- Emulator -->
     <string name="boot_loading">Starting %1$s…</string>

@@ -96,6 +96,10 @@ class Settings private constructor(private val file: File) {
     val language get() = getString(LANGUAGE, "1").toIntOrNull() ?: 1
     val theme get() = getString(THEME, "system")
 
+    var libraryCovers: Boolean
+        get() = getBoolean(LIBRARY_COVERS, false)
+        set(value) = put(LIBRARY_COVERS, value)
+
     /** For androidx.preference screens: every Preference reads and writes through this store. */
     val dataStore: PreferenceDataStore = object : PreferenceDataStore() {
         override fun getString(key: String, defValue: String?) = this@Settings.getString(key, defValue ?: "")
@@ -143,6 +147,7 @@ class Settings private constructor(private val file: File) {
         const val COLOUR = "colour"
         const val LANGUAGE = "language"
         const val THEME = "theme"
+        const val LIBRARY_COVERS = "library_covers"
 
         @Volatile
         private var instance: Settings? = null
