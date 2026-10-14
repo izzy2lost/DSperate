@@ -125,6 +125,16 @@ class SettingsActivity : AppCompatActivity() {
             findPreference<EditTextPreference>(Settings.MESSAGE)?.setOnBindEditTextListener {
                 it.filters = arrayOf(android.text.InputFilter.LengthFilter(26))
             }
+            val links = mapOf<String, () -> Unit>(
+                "about_credits" to { AboutDialogs.showCredits(requireActivity()) },
+                "about_licenses" to { AboutDialogs.showLicences(requireActivity()) },
+                "about_privacy" to { AboutDialogs.openPrivacyPolicy(requireActivity()) },
+                "about_website" to { AboutDialogs.openWebsite(requireActivity()) },
+                "about_source" to { AboutDialogs.openSource(requireActivity()) },
+            )
+            for ((key, action) in links) {
+                findPreference<Preference>(key)?.setOnPreferenceClickListener { action(); true }
+            }
             findPreference<Preference>("about")?.summary = getString(R.string.about_summary, BuildConfig.VERSION_NAME)
             refreshSummaries()
         }

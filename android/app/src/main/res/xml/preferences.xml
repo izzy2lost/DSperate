@@ -310,5 +310,27 @@
             app:key="about"
             app:selectable="false"
             app:title="@string/pref_about" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="about_credits"
+            app:title="@string/about_credits" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="about_licenses"
+            app:title="@string/about_licenses" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="about_privacy"
+            app:title="@string/about_privacy" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="about_website"
+            app:summary="izzy2lost.com/ninds"
+            app:title="@string/about_website" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="about_source"
+            app:summary="github.com/izzy2lost/DSperate"
+            app:title="@string/about_source" />
     </PreferenceCategory>
 </PreferenceScreen>

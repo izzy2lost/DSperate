@@ -1,0 +1,9 @@
+# Release signing. Copy to key.properties and fill in real values; key.properties is gitignored
+# because it holds passwords, and CI reads the same four values out of the environment instead
+# (KEYSTORE_FILE / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD).
+#
+# With neither configured, a release build is left unsigned.
+storeFile=/home/izzy/Desktop/keys/ninds.jks
+storePassword=
+keyAlias=ninds
+keyPassword=

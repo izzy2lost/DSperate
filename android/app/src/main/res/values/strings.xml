@@ -168,6 +168,13 @@
     <string name="pref_cat_about">About</string>
     <string name="pref_about">NinDS</string>
     <string name="about_summary">Version %1$s · Nintendo DS emulation by the DSperate core · GPL-3.0</string>
+    <string name="about_credits">Credits</string>
+    <string name="about_licenses">Open-source licences</string>
+    <string name="about_privacy">Privacy policy</string>
+    <string name="about_website">Website</string>
+    <string name="about_source">Source code</string>
+    <string name="about_open_website">Website</string>
+    <string name="about_trademark_notice">NinDS is not affiliated with or endorsed by Nintendo. Nintendo DS and Nintendo DSi are trademarks of Nintendo. No games, BIOS files or firmware are included.</string>
 
     <!-- Controller mapping -->
     <string name="mapping_press">Press the button to use for this. A new binding replaces any other use of that button.</string>

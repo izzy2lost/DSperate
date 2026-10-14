@@ -1,225 +1,113 @@
-# DSperate (Nintendo DS Emulator)
+<p align="center"><img src="android/play/feature-graphic.png" width="640" alt="NinDS"></p>
 
-AI DISCLAIMER: Agentic coding is used here. A lot. I am not smart enough to keep track
-of all of this with the wet electric meat lump that sits inside my skull.
+# NinDS
 
-A Nintendo DS and DSi emulator that reimplements DraStic's JIT and NEON rendering
-techniques, with modern niceties from melonDS such as per-screen windows and
-local wireless.
-Built for and measured on ARM handhelds (the Anbernic RG DS, an RK3566 with
-four A55 cores); commercial games boot and play. Everything is verified against
-melonDS with frame dumps and instruction traces.
+A Nintendo DS emulator for Android, built on [DSperate](https://github.com/beebono/DSperate), Noxwell's Nintendo DS emulator.
 
-DSperate is a **clean-room** reimplementation of DraStic's *techniques*,
-documented by studying its freely-distributable debug-symbol build (approved
-for distribution by its developer, Exophase) and measuring it on real
-hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques).
+NinDS keeps DSperate's emulation core and replaces the desktop frontend with a native Android one. That frontend adds a game library with box art, on-screen touch controls, gamepad mapping, and a Vulkan renderer that draws 3D at up to 8x the DS's resolution. The core lives in [`src/`](src/) and the Android app in [`android/`](android/).
 
-## Previews
-
-<img src="dsperate-menu.png">
-
-<img src="dsperate-pip.png" width=49.99999%><img src="dsperate-pip2.png" width=49.99999%>
+**Website:** [izzy2lost.com/ninds](https://www.izzy2lost.com/ninds) · **Privacy policy:** [izzy2lost.com/ninds-privacy](https://www.izzy2lost.com/ninds-privacy) · **Testing:** email [izzynochill@gmail.com](mailto:izzynochill@gmail.com?subject=NinDS%20Testing)
 
 ## Features
 
-### Core
+### Library
 
-- **Both CPUs, interpreted or recompiled.** ARM946E-S and ARM7TDMI
-  interpreters on every host; an ARM → AArch64 recompiler and an ARM → ARMv7
-  recompiler ([src/core/cpu/jit/README.md](src/core/cpu/jit/README.md)),
-  verified instruction by instruction against the interpreter.
-- **melonDS-grade cycle timing** with per-page cost tables and TCM windows,
-  plus an idle-loop detector that proves a poll loop side-effect-free and skips
-  to the next event.
-- **Event-bound CPU interleave** as DraStic does it: each CPU runs to the
-  next scheduled event.
-- **Full system.** DMA with burst timing, timers, IPC, SPI (touchscreen,
-  firmware flash, power management, microphone), RTC, divider/sqrt, and Wi-Fi
-  with real frames (see *Local wireless and internet* below).
-- **Fastmem.** The recompilers reach guest RAM through host-mapped views on
-  AArch64 and ARMv7, DS and DSi alike.
-- **Retail cartridges.** KEY1/KEY2 protocol, direct boot, per-title save-chip
-  database (EEPROM and FLASH variants), and IR-cart pass-through for the
-  Pokémon titles that need it. The GBA slot is empty.
-- **Zipped ROMs.** `.zip` files holding an `.nds` load directly (detected by
-  magic, not extension), with an on-disk unpack cache. No zip64, 7z or rar.
-- **2D.** Both engines complete: every BG mode, sprites, windows, mosaic,
-  blending, extended palettes, display capture, display FIFO, master
-  brightness. Rendered lazily in one batch per frame from a write journal,
-  engine B on a worker thread, with NEON line kernels.
-- **3D.** Full geometry engine (timed command FIFO, matrix stacks, lighting,
-  clipping, tests) and a software rasteriser (textures, toon/highlight,
-  shadows, fog, edge marking, anti-aliasing) that matches melonDS pixel for
-  pixel. Runs asynchronously on three worker threads with a decoded-texture
-  cache and a skip for resubmitted frames.
-- **GPU 3D** (`video.gpu3d`, `--gpu3d`, the GPU 3D menu row, off by default):
-  the same polygon lists drawn by Vulkan instead, at the DS's resolution with
-  4x MSAA, the DS's depth, stencil, shadow and translucency rules on the
-  hardware pipeline, and the finished layer read back for the 2D compositor.
-  The frame may be one behind under load (never on a frame the game captures).
-  The software rasteriser stays the exact reference and the fallback: what the
-  GPU draws may differ from it within reason, never in what is on screen. On
-  the RG DS Plus it takes the heaviest scenes (Golden Sun: Dark Dawn, Spirit
-  Tracks) from a few hundred frames over budget per minute to a handful.
-- **Sound.** All sixteen SPU channels (PCM8/16, ADPCM, PSG, noise) and capture
-  units, mixed at the console's real 32728.5 Hz. The frontend paces from its own
-  frame limiter at the console's rate, not from the audio queue, and keeps the
-  host's CPU governor and real-time throttling from stealing frames.
-- **No dumps required.** Without BIOS/firmware files, a built-in FreeBIOS and a
-  generated firmware run games by direct boot. Real dumps (`bios9.bin`,
-  `bios7.bin`, `firmware.bin`, never provided here) unlock the firmware menu and
-  exact timing.
+- Reads `.nds` and zipped games from any folder, through the Storage Access Framework, or opens one game at a time from a file manager.
+- Shows each cartridge's banner icon and title, or switches to box art from the toolbar.
+- Downloads box art and GameTDB titles on demand from [ds-covers](https://github.com/izzy2lost/ds-covers). If a game's own region has no cover, it borrows the same game's cover from another region.
+- Long-press a game to resume where you left off, or to import, export or delete its save.
 
-### Nintendo DSi (experimental)
+### Emulation
 
-- **DSiWare without a NAND.** A `.nds` or `.cia` DSiWare title runs with only the
-  BIOS dumps (all four: DS and DSi): DSperate synthesises the console, its
-  settings, the NAND and a system font of its own, and hands the title over the
-  way the DSi Menu would.
-- **A real NAND.** With `--dsi-mode` and your own `nand.bin`, the console boots
-  to the DSi Menu. The NAND is read-only; writes live in memory and persist
-  beside it. A named title is installed into the session, and installed titles
-  can be started directly through NAND title shortcuts.
-- **DSi hardware.** SD card slot backed by a host folder (synced back, deletions
-  included), microphone, DSi Wi-Fi, PictoChat, and Download Play from the Menu.
-- **Save states, the recompiler, idle skip and fastmem** all work in DSi sessions.
-- **Not yet:** the DSP (titles that start it warn, and camera or DSP audio apps
-  will not work) and DSi-enhanced carts in DSi mode (they run as DS games).
-
-### Local wireless and internet
-
-- **Local wireless over the LAN**, speaking melonDS's protocol so either end can
-  be melonDS: `--lan-host`, `--lan-join`, or `--netplay` to join whoever is on
-  the LAN or host otherwise. Multiplayer and Download Play work, across devices.
-- **Internet** through the emulated access point over a user-mode TCP/IP stack
-  (vendored libslirp; no privileges). Wiimmfi connects.
-- **NETWORK FEATURES** in the pause menu turns a session on or off mid-run. While
-  one is live, the speed knobs, fast forward, frameskip and save states are off,
-  so both consoles stay on the same clock.
+- ARM → AArch64 recompiler (JIT), fastmem, and melonDS-grade timing from the DSperate core.
+- No BIOS dumps needed. A built-in FreeBIOS and a generated firmware start games directly. Your own `bios9.bin`, `bios7.bin` and `firmware.bin` are optional; they boot the DS system menu.
+- **GPU 3D (Vulkan):**
+  - Internal resolution: native, 2x, 3x, 4x, 6x or 8x.
+  - Sub-pixel vertex precision.
+  - 4x MSAA and smooth (bilinear) textures.
+  - 2D layers stay pixel-exact on top.
+- Software 3D renderer, pixel-exact with melonDS, as the default and the fallback.
+- Action Replay cheats, typed in or picked from a `usrcheat.dat` database.
+- Online play through Wiimmfi (off by default).
 
 ### Playing
 
-- **Save states.** Ten slots plus a hidden auto slot that can be written on
-  quit and resumed on the next launch. Exact round trip, includes the screen
-  layout and achievement progress, refuses to load across a different BIOS.
-  DSi states carry the NAND and SD card changes too.
-- **Battery saves** written shortly after the game stops writing and again on
-  pause, lid close and exit (SIGTERM included).
-- **Pause menu** drawn over the game and driven with the DS buttons: save/load,
-  slot list, cheats, options pages (emulation, visual effects, layout,
-  controls, DS settings), achievements, resume and quit.
-- **Action Replay cheats** from a `usrcheat.dat` database, matched by game
-  code and header checksum, toggled per game from the pause menu.
-- **RetroAchievements** (Casual mode only, no Hardcore) via rcheevos: sign in
-  with a username or a token the CFW already holds, unlock toasts, an
-  achievements list and account page in the pause menu, encore mode, and an
-  optional screenshot on unlock. DS games and DSiWare, however they are
-  started. Uses the system's libcurl at runtime.
-- **Firmware boot.** With no ROM the console boots its own DS menu with the
-  clock set from the host. Settings changed inside it are kept in a sidecar
-  file so the dump is never written to. A built-in loader cart in the slot
-  raises a game picker from `[paths] games`; the chosen game is direct-booted.
-- **Fast forward** (held or toggled, optionally capped) and **frameskip**
-  (adaptive or fixed) that skips only drawing, so the emulation stays exact.
-  Skipping runs in whole display periods for games that alternate screens.
-- **Input recording and replay.** A played session becomes a deterministic,
-  reproducible benchmark; [scenes/](scenes/) holds the ones used in the docs.
-- **Microphone and lid.** Real ALSA capture (DC-blocked and noise-gated) or a
-  held-key fake mic; a real hinge switch, host suspend, or a hotkey drives the
-  lid.
-- **Controls.** Keyboard and controller remapping, controller hotkeys as
-  `mod+button` chords, a stick as the d-pad or face buttons, a stick-driven
-  stylus crosshair, per-axis analog remapping for pads whose sticks SDL reports
-  rotated or mirrored, and touch or mouse on the bottom screen. Pad buttons are
-  read by position (SDL's a/b/x/y as south/east/west/north), which the menu
-  shows as position pips; if a pip doesn't match the button pressed, the
-  controller's SDL mapping is wrong and should be fixed there
-  (`SDL_GAMECONTROLLERCONFIG`), not by rebinding.
-- **Config.** An INI in `~/.config/dsperate/` with every key commented, per-game
-  override files by ROM name or game code; [configs/default.ini](configs/default.ini)
-  is the full default file.
+- Layouts: stacked, side by side, hybrid, top only or bottom only, chosen separately for portrait and landscape, with swap and a screen gap.
+- Filters: nearest, bilinear, sharp bilinear, LCD grid and 6x xBRZ, with optional integer scaling.
+- Save states: eight slots with thumbnails, plus an automatic slot written on exit.
+- Fast forward (held or toggled, 2x to unlimited) and frameskip (adaptive or fixed).
+- Touch controls with haptics and adjustable size and opacity. They hide when a gamepad is in use.
+- Gamepad and keyboard mapping, including hotkeys. The left stick can act as the d-pad.
+- Lid close, screenshots to `Pictures/NinDS`, and an FPS counter.
+- The DS user profile (nickname, message, birthday, colour, language) is set from Settings.
 
-### Display
+Requires **Android 9 (API 28) or later** on a **64-bit ARM** device. GPU 3D needs Vulkan 1.1.
 
-- **Layouts:** vertical, horizontal, single, picture-in-picture, and two
-  "dominant" modes where one screen takes the largest whole scale and the other
-  fills what is left. Hotkeys cycle layouts and swap screens, remembered per game.
-- **Scaling filters** applied per scanline straight into the presented buffer:
-  nearest, bilinear, LCD grid, box-filter seams (sharp, shimmer-free), and
-  chunky 2x2 cells; optional integer scaling (letterbox or crop).
-- **3D anti-aliasing** (`video.aa`, `--aa`, the ANTI-ALIASING menu row): the
-  hardware's own edge blend on the software rasteriser (pixel-exact with
-  melonDS), 4x MSAA on the GPU one, which also smooths the creases and cut-out
-  edges the DS leaves stepped.
-- **Screen gap** (`video.screen_gap`, `--screen-gap`): a distance in panel
-  pixels between the two screens of a stacked, side-by-side or dominant pair,
-  or `auto`, which pushes them to the panel's edges when the fit leaves room.
-- **Fastest path to the panel, chosen automatically:** the display engine's
-  hardware scaler on Allwinner handhelds (Miyoo A30), fbdev on the H700 boards,
-  zero-copy dmabuf under Wayland with direct scanout where allowed, our own page
-  flips under KMSDRM, and SDL's renderer only where nothing else applies.
-- **Scaling off the CPU** (`video.gpu_present`, on by default where it works):
-  the DS-resolution frames are scaled and laid out into the scanout buffer by
-  the Rockchip RGA (the RK3566's 2D accelerator, through V4L2) where the
-  device has one, else by a Vulkan compute pass. The RGA leaves the GPU to the
-  3D layer alone; its filter is bilinear, it draws the LCD grid and a fading
-  PiP inset, and the menu greys out what it cannot do (nearest, seams, chunky
-  cells). Rotated panels and everything else fall back to the scanline scaler.
-- **Dual-window mode** for dual-panel handhelds: one fullscreen window per
-  display, one DS screen each.
-- **On-screen overlays:** FPS counter, state slot number, screenshot flash,
-  achievement toasts.
+## Where files live
 
-## Building
+App data sits under `Android/data/com.izzy2lost.ninds/files/`:
 
-Requires CMake ≥ 3.16, Ninja, a C++17 compiler, and SDL2 for the playable
-frontend. The only vendored third-party code is miniz's DEFLATE decompressor
-and rcheevos.
+| Directory | Contents |
+| --- | --- |
+| `bios/` | Imported BIOS and firmware dumps |
+| `saves/` | Battery saves (`<game>.sav`) |
+| `states/<game>/` | Save states and their thumbnails |
+| `cheats/` | Per-game cheat lists |
+| `usrcheat.dat` | The imported cheat database |
 
-    cmake --preset host && cmake --build --preset host && ctest --preset host
+Zipped games are unpacked once into the app's cache; Settings › Clear unpacked games frees that space.
 
-Cross builds: `aarch64-cross` (needs `aarch64-linux-gnu-g++`) and
-`arm32-cross` (needs `arm-linux-gnueabihf-g++`); tests run under
-`qemu-*-static` when present. The recompiler and NEON kernels build only on
-AArch64 and ARMv7 hosts; elsewhere you get the interpreter and the portable
-renderer.
+## Compiling
 
-CMake switches: `DSPERATE_JIT`, `DSPERATE_NEON`, `DSPERATE_TESTS`,
-`DSPERATE_HEADLESS`, `DSPERATE_SDL`, `DSPERATE_WAYLAND`, `DSPERATE_CHEEVOS`,
-`DSPERATE_HARDEN`, and `DSPERATE_PGO=generate|use` (profiles for AArch64 and
-ARMv7 are committed under [pgo/](pgo/)).
+Requires the Android SDK and a JDK, plus the toolchain Gradle pulls in:
 
-## Running
+| | Version |
+| --- | --- |
+| Android Gradle Plugin | 9.2.1 |
+| Gradle | 9.4.1 |
+| NDK | 30.0.15729638 |
+| CMake | 3.30.3 |
+| compileSdk / targetSdk | 36 |
+| minSdk | 28 |
 
-    dsperate [game.nds|game.zip|title.cia] [--bios9 F --bios7 F --firmware F] [options]
-    dsperate --dsi-mode --bios9i F --bios7i F [--dsi-nand nand.bin] [title] [options]
+AGP 9 has built-in Kotlin support, so no Kotlin Gradle plugin is declared. The native library builds the core straight from `src/`, so there is nothing to fetch:
 
-`dsperate --help` lists every option; each has a key in the settings file and
-the command line overrides it. Default keys: arrows and `X`/`Z`/`S`/`A`/`Q`/`W`
-for the face and shoulder buttons, Enter/Right Shift for Start/Select, `P`
-pause menu, `Tab` fast forward, `F5`/`F7` save/load state, `F2`/`F3` change
-slot, `F4`/`F10` cycle layout, `F6` swap screens, `F9` screenshot, `L` lid,
-`M` fake microphone, `F` fullscreen, `Escape` quit.
+```sh
+cd android
+./gradlew assembleDebug      # app/build/outputs/apk/debug/app-debug.apk
+./gradlew bundleRelease      # app/build/outputs/bundle/release/app-release.aab
+```
 
-`dsperate-headless` is the measurement harness: no window or audio, boots the
-firmware or a ROM with `--direct`, and offers instruction traces, frame and
-audio dumps, save-state checkpoints and cheats from the command line. It never
-writes a battery save back.
+Only `arm64-v8a` is built. Debug builds compile the native code optimised too, since the emulator is unusably slow at `-O0`. Release signing reads `android/key.properties`; see [`android/key.properties.example`](android/key.properties.example). The Play listing text and graphics are in [`android/play/`](android/play/).
 
-## Diagnostics, tests and tools
+The lean Vulkan raster's SPIR-V is checked in. After editing a shader under `src/core/gpu/vk/shaders`, run `tools/gen_lean_shaders.sh` and commit the blobs that changed.
 
-Environment variables (`DS_VERBOSE`, `DS_FRAME_STATS`, `DS_FPS`, `DS_PROFILE`,
-`DS_FRAME_HASH`, `DS_IO_CENSUS`, `DS_JIT_*` and others) are documented where
-they are read. `ctest` runs the unit tests in
-[tests/](tests/): interpreter, recompiler against interpreter, NEON kernels
-against portable references, page table, scheduler, I/O, SPU, 2D/3D pipelines
-and the texture cache. [tools/](tools/) holds the PGO refresh scripts, the shader and example-config
-generators, the release ABI-floor check, `mkdsin.py` for scripting an input
-replay, and `mkcart.py` for building a custom loader cart.
+### Layout
 
-## Licence
+- `android/app/src/main/cpp/session.*`: the machine, its emulator thread, pacing, frameskip, saves, states, cheats
+- `android/app/src/main/cpp/presenter_gl.*`: the GLES 3 presenter on its own vsync'd thread, with the filters and the high-resolution 3D composite
+- `android/app/src/main/cpp/audio_out.*`: AAudio output, resampling the DS's 32728.5 Hz with drift correction
+- `android/app/src/main/kotlin/`:
+  - the library: SAF folder scan, banner icons, box art
+  - the emulator activity, which runs in the `:emu` process and ends after each game
+  - on-screen controls, controller mapping and settings
 
-GPLv3 — see [LICENSE](LICENSE). melonDS (GPLv3) is used as reference and, with
-attribution, as a code source. FreeBIOS is under its own licence in
-[src/core/bios/LICENSE.freebios](src/core/bios/LICENSE.freebios).
+Settings live in `files/settings.properties`, not SharedPreferences, so the library process and the `:emu` process always agree.
+
+For the core itself (its techniques, desktop and handheld builds, tests and tools), see upstream [DSperate](https://github.com/beebono/DSperate) and [docs/](docs/).
+
+## Credits and licence
+
+NinDS is licensed under the **GNU General Public License v3.0**; see [LICENSE](LICENSE).
+
+- **[DSperate](https://github.com/beebono/DSperate)** by Noxwell (beebono): the emulator core and everything this port is built on. It is a clean-room reimplementation of DraStic's techniques, documented from DraStic's freely distributable debug build (by Exophase), and is verified against melonDS.
+- **[melonDS](https://github.com/melonDS-emu/melonDS)** (GPL-3.0): the accuracy reference, and a source of code with attribution.
+- **FreeBIOS** by Gilead Kutnick: the built-in BIOS replacement ([licence](src/core/bios/LICENSE.freebios)).
+- **[Kronos](https://github.com/FCare/Kronos)** / **Yabause**: the 6x xBRZ shader in [`xbrz6x_shader.hpp`](android/app/src/main/cpp/xbrz6x_shader.hpp), under GPL-2.0-or-later.
+- **[miniz](https://github.com/richgel999/miniz)**, **[ENet](https://github.com/lsalzman/enet)** and **[libslirp](https://gitlab.freedesktop.org/slirp/libslirp)**: zip reading, local wireless and the user-mode TCP/IP stack behind online play.
+- **Noto Sans** and **WenQuanYi Micro Hei**: the DSi system fonts.
+- **[GameTDB](https://www.gametdb.com)**: box art and game titles.
+
+The app lists every component and its licence under Settings › About.
+
+NinDS does not include any games, BIOS files or firmware. It is not affiliated with or endorsed by Nintendo; Nintendo DS and Nintendo DSi are trademarks of Nintendo.

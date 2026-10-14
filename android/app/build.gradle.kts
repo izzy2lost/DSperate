@@ -1,8 +1,20 @@
+import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
 }
+
+// Release signing: android/key.properties (gitignored; see key.properties.example), or the
+// KEYSTORE_FILE / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD environment variables. With
+// neither, a release build is left unsigned (Android Studio's "Generate Signed Bundle" wizard
+// signs it with its own key either way).
+val keystoreProperties = Properties().apply {
+    val file = rootProject.file("key.properties")
+    if (file.isFile) file.inputStream().use { load(it) }
+}
+val hasReleaseKeystore =
+    keystoreProperties.getProperty("storeFile") != null || System.getenv("KEYSTORE_FILE") != null
 
 android {
     namespace = "com.izzy2lost.ninds"
@@ -33,6 +45,25 @@ android {
         }
     }
 
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                val configuredStore = keystoreProperties.getProperty("storeFile")
+                if (configuredStore != null) {
+                    storeFile = rootProject.file(configuredStore)
+                    storePassword = keystoreProperties.getProperty("storePassword")
+                    keyAlias = keystoreProperties.getProperty("keyAlias")
+                    keyPassword = keystoreProperties.getProperty("keyPassword")
+                } else {
+                    storeFile = file(System.getenv("KEYSTORE_FILE"))
+                    storePassword = System.getenv("KEYSTORE_PASSWORD")
+                    keyAlias = System.getenv("KEY_ALIAS")
+                    keyPassword = System.getenv("KEY_PASSWORD")
+                }
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
@@ -46,6 +77,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            if (hasReleaseKeystore) signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
