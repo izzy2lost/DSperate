@@ -5,6 +5,10 @@
 /app/.cxx/
 /app/.externalNativeBuild/
 /captures/
+
+# Android Studio project files
+.idea/
+*.iml
 /local.properties
 *.apk
 *.aab
