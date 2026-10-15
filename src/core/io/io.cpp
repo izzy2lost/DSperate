@@ -819,8 +819,8 @@ void Io::cart_receive_word(u64 at) {
   cart.romctrl |= 0x00800000u;                 // DRQ
   // Only a cart-mode channel can be started by DRQ; skip the scan when none is armed.
   if (cart_dma_armed()) {
-    nds_.dma.check(Cpu::ARM9, dma::MODE9_CART);
-    nds_.dma.check(Cpu::ARM7, dma::MODE7_CART);
+    if (cart_owner() == Cpu::ARM9) nds_.dma.check(Cpu::ARM9, dma::MODE9_CART);
+    else nds_.dma.check(Cpu::ARM7, dma::MODE7_CART);
   }
   if (cart.fifo_count < 2) cart_schedule_receive(at); else cart.late = true;
 }

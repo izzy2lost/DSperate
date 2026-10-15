@@ -234,6 +234,12 @@ public:
   Cart cart;
   u16 arm7_bios_prot = 0;    // reads below this from outside the BIOS return garbage
   bool cart_drq() { cart_catch_up(); return (cart.romctrl & 0x00800000) != 0; }
+  // The slot's DRQ reaches only the CPU EXMEMCNT bit 11 gives the slot to. The
+  // DS menu's ARM7 leaves a repeating cart DMA armed after loading a card's
+  // secure area; fed the ARM9's words too, it stole one from the menu's banner
+  // read, the CRC failed and the card showed blank.
+  Cpu cart_owner() const { return (exmemcnt & 0x0800) ? Cpu::ARM7 : Cpu::ARM9; }
+  bool cart_drq_for(Cpu cpu) { return cpu == cart_owner() && cart_drq(); }
   // Hot: every ROMCTRL/ROMDATA read.
   void cart_catch_up() { if (cart.transfer_pos < cart.transfer_len) cart_catch_up_slow(); }
   // ARM7 0x04800000-0x0480FFFF, gated on POWCNT2 bit 1.

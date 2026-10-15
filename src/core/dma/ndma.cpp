@@ -72,7 +72,7 @@ void Ndma::write_cnt(Channel& c, u32 v) {
   if (c.cpu == Cpu::ARM7) c.start_mode |= 0x20;
   nds_.dma.update_armed();
   if ((c.start_mode & 0x1F) == 0x10) start(c);
-  else if (c.start_mode == 0x04 || c.start_mode == 0x24) { if (nds_.io.cart_drq()) start(c); }
+  else if (c.start_mode == 0x04 || c.start_mode == 0x24) { if (nds_.io.cart_drq_for(c.cpu)) start(c); }
   else if (c.start_mode == 0x0A) nds_.gpu3d.check_fifo_dma();
   const u32 m = c.start_mode;
   if (m <= 0x03 || (m >= 0x0C && m <= 0x0F) || (m >= 0x20 && m <= 0x23) || m == 0x27 || (m >= 0x2D && m <= 0x2F))
@@ -168,7 +168,7 @@ void Ndma::finished(Channel& c) {
   c.in_progress = false;
   nds_.dma.update_armed();
   if (c.cpu == Cpu::ARM7) { nds_.io.aes.check_input_dma(); nds_.io.aes.check_output_dma(); }   // every ARM7 NDMA end re-polls the AES FIFOs
-  if (c.start_mode == 0x04 || c.start_mode == 0x24) { if (nds_.io.cart_drq()) start(c); }
+  if (c.start_mode == 0x04 || c.start_mode == 0x24) { if (nds_.io.cart_drq_for(c.cpu)) start(c); }
 }
 
 u32 Ndma::run(Cpu cpu, u32 budget) {

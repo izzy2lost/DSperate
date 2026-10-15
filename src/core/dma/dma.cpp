@@ -74,7 +74,7 @@ void Dma::write_cnt(Cpu cpu, int n, u32 v) {
   c.start_mode = (cpu == Cpu::ARM9) ? ((v >> 27) & 7) : (((v >> 28) & 3) | 0x10);
   update_cart_armed();
   if ((c.start_mode & 7) == 0) start(c);
-  else if (c.start_mode == MODE9_CART || c.start_mode == MODE7_CART) { if (nds_.io.cart_drq()) start(c); }
+  else if (c.start_mode == MODE9_CART || c.start_mode == MODE7_CART) { if (nds_.io.cart_drq_for(c.cpu)) start(c); }
   else if (c.start_mode == MODE9_GXFIFO) nds_.gpu3d.check_fifo_dma();
   if (c.start_mode == MODE9_GBA || c.start_mode == MODE7_WIFI_GBA)
     std::fprintf(stderr, "[dma] unimplemented start mode %02x on %s\n", c.start_mode, cpu == Cpu::ARM9 ? "arm9" : "arm7");
@@ -464,7 +464,7 @@ u32 Dma::run_channel_impl(Channel& c, u32 budget) {
   if (c.cnt & (1u << 30)) nds_.io.request_irq(c.cpu, io::IRQ_DMA0 + c.num);
   set_running(c, 0);
   c.in_progress = false;
-  if (c.start_mode == MODE9_CART || c.start_mode == MODE7_CART) { if (nds_.io.cart_drq()) start(c); }
+  if (c.start_mode == MODE9_CART || c.start_mode == MODE7_CART) { if (nds_.io.cart_drq_for(c.cpu)) start(c); }
   return used;
 }
 
