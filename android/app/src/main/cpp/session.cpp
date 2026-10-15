@@ -9,6 +9,7 @@
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
 #endif
+#include "net/lan_mp.h"
 #include "net/slirp_driver.h"
 
 #include <android/log.h>
@@ -140,11 +141,40 @@ std::string Session::boot(const SessionConfig& cfg) {
     if (!nds.gpu3d.renderer().set_gpu(true, &why)) LOGW("gpu3d: unavailable (%s), drawing on the CPU", why.c_str());
     else if (scale > 1) nds.gpu.set_hires(true);
   }
-  if (cfg.internet) {
+  const std::string& mode = cfg.net_mode;
+  if (mode == "internet") {
     slirp_ = std::make_unique<ds::net::SlirpDriver>();
     // Wiimmfi's resolver, as the desktop frontends default to.
     if (slirp_->start(ds::net::SlirpDriver::Dns::Custom, 0xB23E2BD4u)) nds.io.set_net_driver(slirp_.get());
     else { LOGW("internet: %s", slirp_->error().c_str()); slirp_.reset(); }
+  } else if (mode == "auto" || mode == "host" || mode == "guest" || mode == "join") {
+    // Local wireless, as the desktop's net.mode. The scan blocks for up to
+    // 2.5 s; boot runs off the UI thread, behind the loading screen.
+    lan_name_ = cfg.user.nickname.empty() ? std::string("NinDS") : cfg.user.nickname;
+    lan_ = std::make_unique<ds::net::LanMp>();
+    bool up = lan_->ok();
+    std::string status;
+    if (up && (mode == "auto" || mode == "guest")) {
+      const auto role = lan_->start_auto(lan_name_, 2500, 16, mode == "auto");
+      up = role != ds::net::LanMp::Role::None;
+      if (up) status = role == ds::net::LanMp::Role::Host ? "Hosting a session" : "Joined " + lan_->peer_name();
+    } else if (up && mode == "join") {
+      up = !cfg.lan_address.empty() && lan_->start_client(lan_name_, cfg.lan_address);
+      if (up) status = "Joined " + cfg.lan_address;
+    } else if (up) {
+      up = lan_->start_host(lan_name_, 16);
+      if (up) status = "Hosting a session";
+    }
+    if (!up) {
+      LOGW("lan: %s", cfg.lan_address.empty() && mode == "join" ? "no host address set" : lan_->error().c_str());
+      lan_.reset();
+      // A guest that heard nobody tries again when the game puts its radio on the air.
+      guest_retry_armed_ = mode == "guest";
+    } else {
+      LOGI("lan: %s, player %d", status.c_str(), lan_->my_id());
+      nds.io.wifi.set_transport(lan_.get());
+      lan_status_ = status;
+    }
   }
   audio_on_.store(cfg.audio);
   audio_.set_volume(cfg.volume);
@@ -184,6 +214,18 @@ void Session::stop() {
     if (!nds_->save_firmware_override(fw_override_, err)) LOGW("firmware override: %s", err.c_str());
   }
   if (slirp_) { nds_->io.set_net_driver(nullptr); slirp_->stop(); slirp_.reset(); }
+  // A guest says goodbye rather than going silent.
+  if (lan_) { lan_->end_session(); nds_->io.wifi.set_transport(nullptr); lan_.reset(); }
+}
+
+std::string Session::lan_status() {
+  std::lock_guard<std::mutex> lock(mu_);
+  return lan_status_;
+}
+
+void Session::set_lan_status(std::string s) {
+  std::lock_guard<std::mutex> lock(mu_);
+  lan_status_ = std::move(s);
 }
 
 void Session::set_paused(bool paused) {
@@ -351,7 +393,8 @@ void Session::run_one_frame() {
   nds.gpu.set_screen_visible(1, (shown & 2) != 0);
 
   // Frameskip for frame i+1 is decided before frame i runs (its 3D is drawn during frame i).
-  const bool ff = ff_.load(std::memory_order_relaxed);
+  // In a local wireless session the peers keep time: no fast forward.
+  const bool ff = ff_.load(std::memory_order_relaxed) && !lan_;
   const int fs = frameskip_.load(std::memory_order_relaxed);
   bool skip_next = false;
   int pattern = 0;
@@ -370,7 +413,8 @@ void Session::run_one_frame() {
   const bool drawn = !nds.gpu.will_skip_frame();
 
   if (slirp_) slirp_->process();
-  nds.run_frame();
+  if ((lan_ || guest_retry_armed_ || scanning_) && !ff) run_net_frame(nds);
+  else nds.run_frame();
   ++frame_index_;
 
   int16_t buf[1024 * 2];
@@ -416,6 +460,51 @@ void Session::run_one_frame() {
   if (nds.power_off) nds.power_off = false;
 }
 
+void Session::run_net_frame(ds::NDS& nds) {
+  if (lan_) lan_->process();   // ENet and discovery, once per frame, on this thread
+  // Edge-triggered: the game switching its radio on is when a guest looks again.
+  const bool on_air = nds.io.wifi.tx_frames() > 0;
+  if (on_air && !radio_was_on_ && guest_retry_armed_ && !scanning_) {
+    guest_retry_armed_ = false;
+    lan_ = std::make_unique<ds::net::LanMp>();
+    if (lan_->ok() && lan_->start_discovery()) {
+      scanning_ = true;
+      scan_began_ = Clock::now();
+      LOGI("lan: the game is on the air; looking for a session");
+    } else {
+      LOGW("lan: %s", lan_->error().c_str());
+      lan_.reset();
+    }
+  }
+  radio_was_on_ = on_air;
+  if (scanning_) {
+    lan_->scan_step();
+    if (Clock::now() - scan_began_ >= std::chrono::milliseconds(2500)) {   // as start_auto: a host beacons once a second
+      scanning_ = false;
+      if (lan_->scan_join(lan_name_)) {
+        nds.io.wifi.set_transport(lan_.get());
+        LOGI("lan: joined %s as player %d", lan_->peer_name().c_str(), lan_->my_id());
+        set_lan_status("Joined " + lan_->peer_name());
+      } else {
+        LOGW("lan: %s", lan_->error().c_str());
+        lan_.reset();
+      }
+    }
+  }
+  if (!lan_ || scanning_) { nds.run_frame(); return; }
+
+  // Spread the frame's emulation across its period in 1 ms slices, so a
+  // peer's CMD is answered within a slice rather than a frame later.
+  const auto period = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / DS_FPS));
+  const Clock::time_point start = std::max(frame_start_, Clock::now() - period / 2);
+  constexpr uint64_t slice = ds::ARM9_CLOCK_HZ / 1000;
+  constexpr int slices = static_cast<int>(ds::CYCLES_PER_FRAME / slice) + 1;
+  for (int k = 1; !nds.run_frame_slice(slice); ++k) {
+    const Clock::time_point due = start + period * k / slices;
+    if (due - Clock::now() >= std::chrono::microseconds(500)) std::this_thread::sleep_until(due);
+  }
+}
+
 void Session::run() {
   pthread_setname_np(pthread_self(), "NinDS emu");
   // As urgent as the display: a late frame is a dropped frame. Fails quietly where refused.
@@ -442,9 +531,10 @@ void Session::run() {
     if (paused) continue;
     if (reset_clock) { deadline = Clock::now(); late_ = false; }
 
+    frame_start_ = deadline;
     run_one_frame();
 
-    const bool ff = ff_.load(std::memory_order_relaxed);
+    const bool ff = ff_.load(std::memory_order_relaxed) && !lan_;
     const int speed = ff ? ff_speed_.load(std::memory_order_relaxed) : 1;
     const Clock::time_point now = Clock::now();
     if (speed > 0) {

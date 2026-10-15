@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Wi-Fi internet play (Wiimmfi) goes through the network like any other app. -->
+    <!-- Wi-Fi internet play (Wiimmfi) and local wireless go through the network like any other app. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Local wireless: hearing other NinDS/melonDS sessions' broadcast beacons on the Wi-Fi. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />

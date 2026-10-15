@@ -25,7 +25,8 @@ object NativeLib {
         gpuScale: Int,
         texFilter: Boolean,
         antiAliasing: Boolean,
-        internet: Boolean,
+        netMode: String,
+        lanAddress: String,
         audio: Boolean,
         volume: Int,
         nickname: String,
@@ -35,6 +36,9 @@ object NativeLib {
         colour: Int,
         language: Int,
     ): String
+
+    /** Local wireless: empty when not in a session, else who we are in it. */
+    external fun nativeLanStatus(): String
 
     external fun nativeStart()
     external fun nativeShutdown()

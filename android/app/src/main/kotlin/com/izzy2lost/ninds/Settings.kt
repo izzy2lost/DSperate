@@ -57,7 +57,10 @@ class Settings private constructor(private val file: File) {
     val texFilter get() = getBoolean(TEX_FILTER, false)
     val gpuScale get() = getString(GPU_SCALE, "1").toIntOrNull()?.coerceIn(1, 8) ?: 1
     val firmwareBoot get() = getBoolean(FIRMWARE_BOOT, false)
-    val internet get() = getBoolean(INTERNET, false)
+    /** off, internet, auto, host, guest or join. Before this list it was the INTERNET switch. */
+    val netMode get() = getString(NET_MODE, if (getBoolean(INTERNET, false)) "internet" else "off")
+    val lanAddress get() = getString(LAN_ADDRESS, "").trim()
+    val isLocalWireless get() = netMode in setOf("auto", "host", "guest", "join")
     val frameskip get() = getString(FRAMESKIP, "-1").toIntOrNull() ?: -1
     val fastForwardSpeed get() = getString(FF_SPEED, "3").toIntOrNull() ?: 3
     val fastForwardToggle get() = getBoolean(FF_TOGGLE, true)
@@ -120,6 +123,8 @@ class Settings private constructor(private val file: File) {
         const val TEX_FILTER = "tex_filter"
         const val FIRMWARE_BOOT = "firmware_boot"
         const val INTERNET = "internet"
+        const val NET_MODE = "net_mode"
+        const val LAN_ADDRESS = "lan_address"
         const val FRAMESKIP = "frameskip"
         const val FF_SPEED = "ff_speed"
         const val FF_TOGGLE = "ff_toggle"

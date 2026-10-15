@@ -101,8 +101,11 @@
     <string name="pref_ff_toggle_summary">Off: fast-forward only while the button is held</string>
     <string name="pref_firmware_boot">Boot through the DS menu</string>
     <string name="pref_firmware_boot_summary">Needs your own BIOS and firmware dumps. Off starts games directly.</string>
-    <string name="pref_internet">Wi-Fi internet (Wiimmfi)</string>
-    <string name="pref_internet_summary">Lets games go online through Wiimmfi, the community Nintendo WFC replacement</string>
+    <string name="pref_net_mode">Wireless</string>
+    <string name="pref_lan_address">Host address</string>
+    <string name="pref_lan_address_message">The IP address of the device hosting the session, e.g. 192.168.1.20. Only needed when discovery cannot see it.</string>
+    <string name="lan_joined">Local wireless: %1$s</string>
+    <string name="lan_none">Local wireless: no session found. Will look again when the game turns on its wireless.</string>
     <string name="pref_auto_save_state">Auto-save state on exit</string>
     <string name="pref_auto_save_state_summary">Long-press a game in the library to resume where you left off</string>
     <string name="pref_restart_note">Emulation settings take effect the next time a game starts.</string>

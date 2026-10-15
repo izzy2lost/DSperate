@@ -125,6 +125,14 @@ class SettingsActivity : AppCompatActivity() {
             findPreference<EditTextPreference>(Settings.MESSAGE)?.setOnBindEditTextListener {
                 it.filters = arrayOf(android.text.InputFilter.LengthFilter(26))
             }
+            // The old Internet switch becomes the list's "internet"; the address only matters for "join".
+            val lanAddress = findPreference<EditTextPreference>(Settings.LAN_ADDRESS)
+            findPreference<ListPreference>(Settings.NET_MODE)?.apply {
+                value = settings.netMode
+                lanAddress?.isVisible = value == "join"
+                setOnPreferenceChangeListener { _, mode -> lanAddress?.isVisible = mode == "join"; true }
+            }
+            lanAddress?.setOnBindEditTextListener { it.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI }
             val links = mapOf<String, () -> Unit>(
                 "about_credits" to { AboutDialogs.showCredits(requireActivity()) },
                 "about_licenses" to { AboutDialogs.showLicences(requireActivity()) },

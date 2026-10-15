@@ -186,4 +186,21 @@
         <item>4</item>
         <item>5</item>
     </string-array>
+
+    <string-array name="net_mode_entries">
+        <item>Off</item>
+        <item>Internet (Wiimmfi)</item>
+        <item>Local: join, or host if nobody is</item>
+        <item>Local: host</item>
+        <item>Local: join only</item>
+        <item>Local: join by address</item>
+    </string-array>
+    <string-array name="net_mode_values" translatable="false">
+        <item>off</item>
+        <item>internet</item>
+        <item>auto</item>
+        <item>host</item>
+        <item>guest</item>
+        <item>join</item>
+    </string-array>
 </resources>

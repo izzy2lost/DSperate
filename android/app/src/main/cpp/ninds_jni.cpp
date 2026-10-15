@@ -76,7 +76,7 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM*, void*) {
 
 JNI_FN(jstring, nativeBoot)(JNIEnv* env, jobject, jint rom_fd, jstring rom_name, jstring save_path, jstring cache_dir,
                             jstring bios_dir, jboolean firmware_boot, jboolean jit, jboolean fast_timing, jboolean gpu3d,
-                            jint gpu_scale, jboolean tex_filter, jboolean aa, jboolean internet, jboolean audio, jint volume, jstring nickname, jstring message,
+                            jint gpu_scale, jboolean tex_filter, jboolean aa, jstring net_mode, jstring lan_address, jboolean audio, jint volume, jstring nickname, jstring message,
                             jint birthday_month, jint birthday_day, jint colour, jint language) {
   if (g_session) { g_session->stop(); g_session.reset(); }
   ninds::SessionConfig cfg;
@@ -92,7 +92,8 @@ JNI_FN(jstring, nativeBoot)(JNIEnv* env, jobject, jint rom_fd, jstring rom_name,
   cfg.gpu_scale = gpu_scale;
   cfg.tex_filter = tex_filter;
   cfg.aa = aa;
-  cfg.internet = internet;
+  cfg.net_mode = str(env, net_mode);
+  cfg.lan_address = str(env, lan_address);
   cfg.audio = audio;
   cfg.volume = volume;
   const std::string nick = str(env, nickname);
@@ -106,6 +107,11 @@ JNI_FN(jstring, nativeBoot)(JNIEnv* env, jobject, jint rom_fd, jstring rom_name,
   const std::string err = g_session->boot(cfg);
   if (!err.empty()) g_session.reset();
   return jstr(env, err);
+}
+
+JNI_FN(jstring, nativeLanStatus)(JNIEnv* env, jobject) {
+  auto* s = session();
+  return jstr(env, s ? s->lan_status() : std::string());
 }
 
 JNI_FN(void, nativeStart)(JNIEnv*, jobject) { if (auto* s = session()) s->start(); }

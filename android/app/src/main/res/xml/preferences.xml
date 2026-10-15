@@ -80,12 +80,20 @@
             app:key="firmware_boot"
             app:summary="@string/pref_firmware_boot_summary"
             app:title="@string/pref_firmware_boot" />
-        <SwitchPreferenceCompat
-            app:defaultValue="false"
+        <ListPreference
+            app:defaultValue="off"
+            app:entries="@array/net_mode_entries"
+            app:entryValues="@array/net_mode_values"
             app:iconSpaceReserved="false"
-            app:key="internet"
-            app:summary="@string/pref_internet_summary"
-            app:title="@string/pref_internet" />
+            app:key="net_mode"
+            app:title="@string/pref_net_mode"
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:iconSpaceReserved="false"
+            app:key="lan_address"
+            app:dialogMessage="@string/pref_lan_address_message"
+            app:title="@string/pref_lan_address"
+            app:useSimpleSummaryProvider="true" />
         <Preference
             app:iconSpaceReserved="false"
             app:selectable="false"

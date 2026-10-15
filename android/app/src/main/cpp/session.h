@@ -11,6 +11,7 @@
 #include "core/nds.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -20,7 +21,7 @@
 #include <thread>
 #include <vector>
 
-namespace ds::net { class SlirpDriver; }
+namespace ds::net { class SlirpDriver; class LanMp; }
 
 namespace ninds {
 
@@ -37,7 +38,10 @@ struct SessionConfig {
   int gpu_scale = 1;            // 3D internal resolution (1-8); above 1 implies the GPU raster
   bool tex_filter = false;      // bilinear texture filtering; implies the GPU raster
   bool aa = false;
-  bool internet = false;
+  // off, internet (Wiimmfi), or local wireless: auto (join a session heard on the
+  // LAN, else host one), host, guest (join only), join (lan_address).
+  std::string net_mode = "off";
+  std::string lan_address;
   bool audio = true;
   int volume = 100;
   ds::bios::UserSettings user;
@@ -85,6 +89,8 @@ public:
   std::vector<CheatItem> database_cheats(const std::string& db_path, std::string& err);
 
   double fps() const { return fps_.load(std::memory_order_relaxed); }
+  // Local wireless: "" when no session, else who we are in it ("Hosting" / "Joined <name>").
+  std::string lan_status();
   std::string game_code() const;
 
 private:
@@ -93,6 +99,8 @@ private:
   void post(std::function<void()> job, bool wait);
   void drain_jobs();
   void write_save();
+  void run_net_frame(ds::NDS& nds);
+  void set_lan_status(std::string s);
 
   std::unique_ptr<ds::NDS> nds_;
   SessionConfig cfg_;
@@ -101,6 +109,9 @@ private:
   Presenter presenter_;
   AudioOut audio_;
   std::unique_ptr<ds::net::SlirpDriver> slirp_;
+  std::unique_ptr<ds::net::LanMp> lan_;
+  std::string lan_name_;
+  std::string lan_status_;        // guarded by mu_
 
   std::thread thread_;
   std::mutex mu_;
@@ -122,6 +133,10 @@ private:
   bool late_ = false;             // the last frame missed its deadline
   uint64_t frame_index_ = 0;
   std::vector<int16_t> mic_buf_;
+  std::chrono::steady_clock::time_point frame_start_{};   // when this frame is due to begin
+  // Guest that heard nobody at boot: one more scan when the game first goes on the air.
+  bool guest_retry_armed_ = false, radio_was_on_ = false, scanning_ = false;
+  std::chrono::steady_clock::time_point scan_began_{};
   HiresFrame hires_;            // this frame's high-res 3D data, on its way to the presenter
   uint32_t mic_seed_ = 0x1234567u;
 };

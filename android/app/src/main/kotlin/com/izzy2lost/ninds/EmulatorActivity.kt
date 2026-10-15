@@ -8,6 +8,7 @@ import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.hardware.input.InputManager
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -63,6 +64,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
 
     private var activityPaused = false
     private var dialogHolds = 0
+    // Local wireless discovery is UDP broadcast, which many Wi-Fi drivers drop without this.
+    private var multicastLock: WifiManager.MulticastLock? = null
     private var currentDialog: AlertDialog? = null
 
     private var touchMask = 0
@@ -118,6 +121,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         getSystemService(InputManager::class.java).registerInputDeviceListener(this, handler)
 
         applyRuntimeSettings()
+        if (settings.isLocalWireless) {
+            multicastLock = getSystemService(WifiManager::class.java)?.createMulticastLock("NinDS local wireless")
+                ?.apply { setReferenceCounted(false); acquire() }
+        }
         boot(Uri.parse(uri), fileName, intent.getIntExtra(EXTRA_LOAD_SLOT, -1))
     }
 
@@ -130,7 +137,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
                 NativeLib.nativeBoot(
                     pfd.fd, fileName, paths.savFile(stem).path, paths.cache.path, paths.bios.path,
                     settings.firmwareBoot, settings.jit, settings.fastTiming, settings.gpu3d, settings.gpuScale, settings.texFilter, settings.antiAliasing,
-                    settings.internet, settings.audio, settings.volume, settings.nickname, settings.message,
+                    settings.netMode, settings.lanAddress, settings.audio, settings.volume, settings.nickname, settings.message,
                     settings.birthdayMonth, settings.birthdayDay, settings.favouriteColour, settings.language,
                 )
             }.getOrElse { it.message ?: getString(R.string.error_open_rom) }
@@ -165,6 +172,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         updateLayout()
         updatePause()
         stateMessage?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
+        if (settings.isLocalWireless) {
+            val status = NativeLib.nativeLanStatus()
+            Toast.makeText(this, if (status.isEmpty()) getString(R.string.lan_none) else getString(R.string.lan_joined, status), Toast.LENGTH_LONG).show()
+        }
         handler.post(fpsTicker)
     }
 
@@ -189,6 +200,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         getSystemService(InputManager::class.java).unregisterInputDeviceListener(this)
+        multicastLock?.release()
         super.onDestroy()
         if (isFinishing) {
             if (!exiting) shutdownNative(save = true)
@@ -247,7 +259,9 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
     }
 
     private fun updatePause() {
-        val paused = !booted || activityPaused || dialogHolds > 0
+        // In a local wireless session the peers keep time: the menu leaves the game running.
+        val inLanSession = booted && settings.isLocalWireless && NativeLib.nativeLanStatus().isNotEmpty()
+        val paused = !booted || activityPaused || (dialogHolds > 0 && !inLanSession)
         controls.suspended = paused
         if (booted) NativeLib.nativeSetPaused(paused)
         if (paused) { heldKeys.clear(); padMask = 0; stickMask = 0; touchMask = 0; pushButtons() }
