@@ -109,6 +109,11 @@ JNI_FN(jstring, nativeBoot)(JNIEnv* env, jobject, jint rom_fd, jstring rom_name,
   return jstr(env, err);
 }
 
+JNI_FN(jstring, nativeBootNote)(JNIEnv* env, jobject) {
+  auto* s = session();
+  return jstr(env, s ? s->boot_note() : std::string());
+}
+
 JNI_FN(jstring, nativeLanStatus)(JNIEnv* env, jobject) {
   auto* s = session();
   return jstr(env, s ? s->lan_status() : std::string());

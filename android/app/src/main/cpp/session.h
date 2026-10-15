@@ -95,6 +95,8 @@ public:
   // Local wireless: "" when no session, else who we are in it ("Hosting" / "Joined <name>").
   std::string lan_status();
   std::string game_code() const;
+  // Something the player should know about how the game was started; empty if nothing.
+  std::string boot_note();
 
 private:
   void run();
@@ -103,11 +105,14 @@ private:
   void drain_jobs();
   void write_save();
   void run_net_frame(ds::NDS& nds);
+  static bool game_launched(ds::NDS& nds);
   void set_lan_status(std::string s);
 
   std::unique_ptr<ds::NDS> nds_;
   SessionConfig cfg_;
   bool jit_on_ = false;
+  bool strict_for_menu_ = false;  // emulator thread: the recompiler is strict until the DS menu launches the game
+  std::string boot_note_;         // guarded by mu_ once running
   std::string fw_override_;
   Presenter presenter_;
   AudioOut audio_;

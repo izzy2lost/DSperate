@@ -37,6 +37,9 @@ object NativeLib {
         language: Int,
     ): String
 
+    /** How the game was started, when the player asked for something else (the DS menu); else empty. */
+    external fun nativeBootNote(): String
+
     /** Local wireless: empty when not in a session, else who we are in it. */
     external fun nativeLanStatus(): String
 

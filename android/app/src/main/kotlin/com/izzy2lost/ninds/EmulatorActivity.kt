@@ -175,6 +175,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         updateLayout()
         updatePause()
         stateMessage?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
+        NativeLib.nativeBootNote().takeIf { it.isNotEmpty() }?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
         // The permission was revoked since the setting was chosen: ask again.
         if (settings.micMode == "phone" && !hasMicPermission()) askMic.launch(Manifest.permission.RECORD_AUDIO)
         if (settings.isLocalWireless) {

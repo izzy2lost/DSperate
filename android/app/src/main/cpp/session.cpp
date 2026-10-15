@@ -91,6 +91,7 @@ std::string Session::boot(const SessionConfig& cfg) {
   if (!nds.load_bios(have_bios ? b9 : "", have_bios ? b7 : "", file_exists(fw) ? fw : "", cfg.user, &err)) {
     // A bad dump should not keep the game from starting: fall back to the built-in BIOS.
     LOGW("bios: %s; using the built-in BIOS", err.c_str());
+    boot_note_ = "Your BIOS or firmware files could not be used (" + err.substr(err.rfind('/') + 1) + "); using the built-in BIOS.";
     if (!nds.load_bios("", "", "", cfg.user, &err)) return "BIOS: " + err;
   }
   if (!nds.firmware_synthetic) {
@@ -112,7 +113,19 @@ std::string Session::boot(const SessionConfig& cfg) {
   const std::string name = names + "/" + sanitize(cfg.rom_name.empty() ? std::string("game.nds") : cfg.rom_name);
   if (FILE* f = std::fopen(name.c_str(), "ab")) std::fclose(f);
   if (!nds.load_rom_fd(cfg.rom_fd, name)) return "Could not read the ROM. Is it a Nintendo DS game?";
-  if (!cfg.firmware_boot || !nds.can_boot_firmware()) nds.setup_direct_boot();
+  // The DS menu needs the console's own BIOS and a DS or DS Lite firmware: a
+  // DSi or 3DS dump (128 KB, console type 0x57) carries no DS boot code and
+  // would leave the screens black. Anything less starts the game directly.
+  bool firmware_boot = cfg.firmware_boot;
+  if (firmware_boot && !nds.can_boot_firmware()) {
+    firmware_boot = false;
+    if (boot_note_.empty()) boot_note_ = "The DS menu needs your own BIOS and firmware dumps; the game was started directly.";
+  } else if (firmware_boot && (nds.firmware.size() < 0x40000 || nds.firmware[0x1D] == 0x57)) {
+    firmware_boot = false;
+    boot_note_ = "This firmware is from a DSi or 3DS and cannot show the DS menu; the game was started directly.";
+  }
+  if (!boot_note_.empty()) LOGW("%s", boot_note_.c_str());
+  if (!firmware_boot) nds.setup_direct_boot();
 
   if (nds.cart && !cfg.save_path.empty()) {
     std::vector<uint8_t> data = slurp(cfg.save_path);
@@ -130,6 +143,14 @@ std::string Session::boot(const SessionConfig& cfg) {
 #if DSPERATE_JIT
   jit_on_ = cfg.jit && ds::jit::attach(nds, true, true);
   if (cfg.jit && !jit_on_) LOGW("recompiler unavailable; interpreting");
+  // The DS menu boots under per-instruction budget checks, as on the desktop:
+  // block-granularity overshoot can stop it booting (a black screen). Dropped
+  // once the menu has launched the game, which wants the speed.
+  if (jit_on_ && firmware_boot) {
+    ds::jit::set_strict(true);
+    strict_for_menu_ = true;
+    LOGI("jit: strict timing for the DS menu");
+  }
 #endif
   nds.gpu3d.renderer().set_aa(cfg.aa);
   // Upscaled 3D and smoothed textures are the GPU raster's: either turns it on.
@@ -181,6 +202,21 @@ std::string Session::boot(const SessionConfig& cfg) {
   LOGI("booted %.4s (%s, %s BIOS, %s)", nds.cart ? nds.cart->header().game_code : "????", jit_on_ ? "recompiler" : "interpreter",
        nds.bios_native ? "native" : "built-in", ds::g_fast_timing ? "fast timing" : "exact timing");
   return {};
+}
+
+// The DS menu has launched the game once the ARM9 runs inside the game's own
+// binary. Its code being in RAM says nothing: the menu loads the whole game
+// while the health and safety screen is up, before anything is picked.
+bool Session::game_launched(ds::NDS& nds) {
+  if (!nds.cart) return true;
+  const ds::cart::Header& h = nds.cart->header();
+  const uint32_t pc = nds.arm9->hot.regs[15];
+  return pc >= h.arm9_ram_address && pc - h.arm9_ram_address < h.arm9_size;
+}
+
+std::string Session::boot_note() {
+  std::lock_guard<std::mutex> lock(mu_);
+  return boot_note_;
 }
 
 std::string Session::game_code() const {
@@ -465,6 +501,13 @@ void Session::run_one_frame() {
     if (writes != last_sram_writes_) { last_sram_writes_ = writes; sram_quiet_frames_ = 0; }
     else if (nds.cart->sram_dirty() && ++sram_quiet_frames_ >= SRAM_QUIET_FRAMES) { write_save(); sram_quiet_frames_ = 0; }
   }
+#if DSPERATE_JIT
+  if (strict_for_menu_ && game_launched(nds)) {
+    strict_for_menu_ = false;
+    ds::jit::set_strict(std::getenv("DS_JIT_STRICT") != nullptr);
+    LOGI("jit: the DS menu launched the game; full speed");
+  }
+#endif
   // The game asked the console to switch off; there is no power to cut, so carry on.
   if (nds.power_off) nds.power_off = false;
 }
