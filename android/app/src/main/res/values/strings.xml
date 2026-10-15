@@ -130,6 +130,8 @@
     <string name="pref_cat_audio">Audio</string>
     <string name="pref_audio">Sound</string>
     <string name="pref_volume">Volume</string>
+    <string name="pref_mic">Microphone</string>
+    <string name="mic_denied">Microphone permission refused: the MIC button still works as a blow.</string>
 
     <string name="pref_cat_controls">Controls</string>
     <string name="pref_touch_controls">On-screen controls</string>

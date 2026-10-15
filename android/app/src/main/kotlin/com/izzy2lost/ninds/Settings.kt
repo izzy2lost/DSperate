@@ -83,6 +83,8 @@ class Settings private constructor(private val file: File) {
 
     val audio get() = getBoolean(AUDIO, true)
     val volume get() = getInt(VOLUME, 100)
+    /** off, blow (the MIC button only) or phone (the real microphone; the button still blows). */
+    val micMode get() = getString(MIC_MODE, "blow")
 
     val touchControls get() = getBoolean(TOUCH_CONTROLS, true)
     val hideWithGamepad get() = getBoolean(HIDE_WITH_GAMEPAD, true)
@@ -142,6 +144,7 @@ class Settings private constructor(private val file: File) {
         const val ORIENTATION = "orientation"
         const val AUDIO = "audio"
         const val VOLUME = "volume"
+        const val MIC_MODE = "mic_mode"
         const val TOUCH_CONTROLS = "touch_controls"
         const val HIDE_WITH_GAMEPAD = "hide_with_gamepad"
         const val CONTROLS_OPACITY = "controls_opacity"

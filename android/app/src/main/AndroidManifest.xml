@@ -6,6 +6,8 @@
     <!-- Local wireless: hearing other NinDS/melonDS sessions' broadcast beacons on the Wi-Fi. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Only when Settings > Microphone is "Phone microphone", for games that listen (Nintendogs, Brain Age). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />

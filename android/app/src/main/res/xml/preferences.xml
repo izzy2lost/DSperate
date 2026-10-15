@@ -190,6 +190,14 @@
             app:key="volume"
             app:showSeekBarValue="true"
             app:title="@string/pref_volume" />
+        <ListPreference
+            app:defaultValue="blow"
+            app:entries="@array/mic_entries"
+            app:entryValues="@array/mic_values"
+            app:iconSpaceReserved="false"
+            app:key="mic_mode"
+            app:title="@string/pref_mic"
+            app:useSimpleSummaryProvider="true" />
     </PreferenceCategory>
 
     <PreferenceCategory app:title="@string/pref_cat_controls" app:iconSpaceReserved="false">

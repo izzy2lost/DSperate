@@ -1,6 +1,8 @@
 package com.izzy2lost.ninds
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.enableEdgeToEdge
@@ -8,6 +10,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
+import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
@@ -48,6 +51,14 @@ class SettingsActivity : AppCompatActivity() {
             BIOS9("bios9.bin", setOf(4096L), "import_bios9"),
             BIOS7("bios7.bin", setOf(16384L), "import_bios7"),
             FIRMWARE("firmware.bin", setOf(128L * 1024, 256L * 1024, 512L * 1024), "import_firmware"),
+        }
+
+        private val askMic = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (!granted) {
+                // No microphone without the permission: back to the blow button.
+                findPreference<ListPreference>(Settings.MIC_MODE)?.value = "blow"
+                toast(R.string.mic_denied)
+            }
         }
 
         private val pickBios = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -124,6 +135,12 @@ class SettingsActivity : AppCompatActivity() {
             }
             findPreference<ListPreference>(Settings.THEME)?.setOnPreferenceChangeListener { _, value -> restyle(value as String); true }
             findPreference<ListPreference>(Settings.ACCENT)?.setOnPreferenceChangeListener { _, _ -> restyle(settings.theme); true }
+            findPreference<ListPreference>(Settings.MIC_MODE)?.setOnPreferenceChangeListener { _, mode ->
+                if (mode == "phone" && ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    askMic.launch(Manifest.permission.RECORD_AUDIO)
+                }
+                true
+            }
             val preview = findPreference<ControlsPreviewPreference>("controls_preview")
             for (key in listOf(Settings.CONTROLS_SKIN, Settings.FACE_COLOURS)) {
                 findPreference<Preference>(key)?.setOnPreferenceChangeListener { _, _ -> listView.post { preview?.refresh() }; true }

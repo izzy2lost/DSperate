@@ -255,4 +255,15 @@
         <item>guest</item>
         <item>join</item>
     </string-array>
+
+    <string-array name="mic_entries">
+        <item>Off</item>
+        <item>MIC button only (blow)</item>
+        <item>Phone microphone</item>
+    </string-array>
+    <string-array name="mic_values" translatable="false">
+        <item>off</item>
+        <item>blow</item>
+        <item>phone</item>
+    </string-array>
 </resources>

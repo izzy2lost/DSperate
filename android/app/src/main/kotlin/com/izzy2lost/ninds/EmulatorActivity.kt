@@ -1,7 +1,9 @@
 package com.izzy2lost.ninds
 
 import android.content.ContentValues
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
@@ -31,6 +33,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
@@ -172,6 +175,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         updateLayout()
         updatePause()
         stateMessage?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
+        // The permission was revoked since the setting was chosen: ask again.
+        if (settings.micMode == "phone" && !hasMicPermission()) askMic.launch(Manifest.permission.RECORD_AUDIO)
         if (settings.isLocalWireless) {
             val status = NativeLib.nativeLanStatus()
             Toast.makeText(this, if (status.isEmpty()) getString(R.string.lan_none) else getString(R.string.lan_joined, status), Toast.LENGTH_LONG).show()
@@ -257,7 +262,22 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         NativeLib.nativeSetFastForwardSpeed(settings.fastForwardSpeed)
         NativeLib.nativeSetVolume(settings.volume)
         NativeLib.nativeSetAudioEnabled(settings.audio)
+        NativeLib.nativeSetMicMode(micMode())
         updateLayout()
+    }
+
+    private fun hasMicPermission() = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    /** The phone's microphone only with the permission; without it the MIC button still blows. */
+    private fun micMode() = when (settings.micMode) {
+        "off" -> 0
+        "phone" -> if (hasMicPermission()) 2 else 1
+        else -> 1
+    }
+
+    private val askMic = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (booted) NativeLib.nativeSetMicMode(micMode())
+        if (!granted) Toast.makeText(this, R.string.mic_denied, Toast.LENGTH_LONG).show()
     }
 
     private fun updatePause() {

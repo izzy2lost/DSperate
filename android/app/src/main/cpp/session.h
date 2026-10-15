@@ -6,6 +6,7 @@
 // (where the core allows save states, resets and cheat changes).
 #pragma once
 #include "audio_out.h"
+#include "mic_in.h"
 #include "presenter_gl.h"
 
 #include "core/nds.h"
@@ -71,6 +72,8 @@ public:
   }
   void set_lid(bool closed) { lid_.store(closed, std::memory_order_relaxed); }
   void set_mic(bool blowing) { mic_.store(blowing, std::memory_order_relaxed); }
+  // 0 = off, 1 = the blow button only, 2 = the phone's microphone (the button still blows).
+  void set_mic_mode(int mode) { mic_mode_.store(mode, std::memory_order_relaxed); }
   void set_fast_forward(bool on) { ff_.store(on, std::memory_order_relaxed); }
   void set_ff_speed(int multiplier) { ff_speed_.store(multiplier, std::memory_order_relaxed); }   // 0 = unlimited
   // 0 = none, -1 = auto (skip when late, up to 3 in a row), N = draw one in N+1.
@@ -108,6 +111,8 @@ private:
   std::string fw_override_;
   Presenter presenter_;
   AudioOut audio_;
+  MicIn mic_in_;
+  bool mic_tried_ = false;        // emulator thread: opened (or failed to) once already
   std::unique_ptr<ds::net::SlirpDriver> slirp_;
   std::unique_ptr<ds::net::LanMp> lan_;
   std::string lan_name_;
@@ -123,7 +128,7 @@ private:
 
   std::atomic<uint32_t> buttons_{0}, touch_{0};
   std::atomic<bool> lid_{false}, mic_{false}, ff_{false}, audio_on_{true};
-  std::atomic<int> ff_speed_{3}, frameskip_{0}, shown_{3};
+  std::atomic<int> ff_speed_{3}, frameskip_{0}, shown_{3}, mic_mode_{1};
   std::atomic<double> fps_{0.0};
 
   // Emulator thread only.

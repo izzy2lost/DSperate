@@ -22,7 +22,8 @@ add_library(ninds SHARED
   ninds_jni.cpp
   session.cpp
   presenter_gl.cpp
-  audio_out.cpp)
+  audio_out.cpp
+  mic_in.cpp)
 target_include_directories(ninds PRIVATE ${DSPERATE_ROOT}/src)
 target_compile_options(ninds PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_link_libraries(ninds PRIVATE

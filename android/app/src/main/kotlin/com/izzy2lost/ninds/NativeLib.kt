@@ -53,6 +53,8 @@ object NativeLib {
     external fun nativeSetTouch(x: Int, y: Int, down: Boolean)
     external fun nativeSetLid(closed: Boolean)
     external fun nativeSetMic(blowing: Boolean)
+    /** 0 = off, 1 = the blow button only, 2 = the phone's microphone. */
+    external fun nativeSetMicMode(mode: Int)
     external fun nativeSetFastForward(on: Boolean)
     external fun nativeSetFastForwardSpeed(multiplier: Int)
     external fun nativeSetFrameskip(frames: Int)

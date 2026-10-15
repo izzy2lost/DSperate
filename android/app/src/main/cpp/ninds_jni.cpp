@@ -140,6 +140,7 @@ JNI_FN(void, nativeSetButtons)(JNIEnv*, jobject, jint mask) { if (auto* s = sess
 JNI_FN(void, nativeSetTouch)(JNIEnv*, jobject, jint x, jint y, jboolean down) { if (auto* s = session()) s->set_touch(x, y, down); }
 JNI_FN(void, nativeSetLid)(JNIEnv*, jobject, jboolean closed) { if (auto* s = session()) s->set_lid(closed); }
 JNI_FN(void, nativeSetMic)(JNIEnv*, jobject, jboolean on) { if (auto* s = session()) s->set_mic(on); }
+JNI_FN(void, nativeSetMicMode)(JNIEnv*, jobject, jint mode) { if (auto* s = session()) s->set_mic_mode(mode); }
 JNI_FN(void, nativeSetFastForward)(JNIEnv*, jobject, jboolean on) { if (auto* s = session()) s->set_fast_forward(on); }
 JNI_FN(void, nativeSetFastForwardSpeed)(JNIEnv*, jobject, jint m) { if (auto* s = session()) s->set_ff_speed(m); }
 JNI_FN(void, nativeSetFrameskip)(JNIEnv*, jobject, jint n) { if (auto* s = session()) s->set_frameskip(n); }

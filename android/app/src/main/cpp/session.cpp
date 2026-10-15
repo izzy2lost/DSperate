@@ -206,6 +206,7 @@ void Session::stop() {
     thread_.join();
   }
   audio_.stop();
+  mic_in_.close();
   presenter_.stop();
   if (!nds_) return;
   if (nds_->cart && nds_->cart->sram_dirty()) write_save();
@@ -235,6 +236,7 @@ void Session::set_paused(bool paused) {
     clock_reset_.store(true);
   }
   audio_.set_paused(paused);
+  mic_in_.set_paused(paused);
   cv_.notify_all();
 }
 
@@ -377,7 +379,8 @@ void Session::run_one_frame() {
     nds.io.set_lid(lid);
     if (lid && nds.cart && nds.cart->sram_dirty()) write_save();
   }
-  if (mic_.load(std::memory_order_relaxed)) {
+  const int mic_mode = mic_mode_.load(std::memory_order_relaxed);
+  if (mic_mode > 0 && mic_.load(std::memory_order_relaxed)) {
     // Blowing into the microphone: loud noise is what games listen for.
     mic_buf_.resize(800);
     for (int16_t& s : mic_buf_) {
@@ -385,7 +388,13 @@ void Session::run_one_frame() {
       s = static_cast<int16_t>(static_cast<int32_t>(mic_seed_ >> 16) - 32768) / 2;
     }
     nds.io.set_mic(mic_buf_.data(), mic_buf_.size());
+  } else if (mic_mode == 2) {
+    // Opened the first time the game reads the microphone, not before.
+    if (!mic_tried_ && nds.io.mic_used()) { mic_tried_ = true; mic_in_.open(); }
+    mic_in_.take_frame(mic_buf_);
+    nds.io.set_mic(mic_buf_.empty() ? nullptr : mic_buf_.data(), mic_buf_.size());
   } else {
+    if (mic_in_.active()) { mic_in_.close(); mic_tried_ = false; }
     nds.io.set_mic(nullptr, 0);
   }
   const int shown = shown_.load(std::memory_order_relaxed);
