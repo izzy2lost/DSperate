@@ -10,6 +10,7 @@
         <item name="android:colorBackground">@color/ninds_background</item>
         <item name="android:windowBackground">@color/ninds_background</item>
         <item name="preferenceTheme">@style/PreferenceThemeOverlay</item>
+        <item name="nindsCardColor">@color/ninds_card</item>
     </style>
 
     <!-- The game draws edge to edge on black; dialogs over it follow the app theme. -->
@@ -17,5 +18,76 @@
         <item name="android:windowFullscreen">true</item>
         <item name="android:windowBackground">@android:color/black</item>
         <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+
+    <!-- Accent overlays, laid over Theme.NinDS by NinDSApp before each activity inflates. -->
+    <style name="ThemeOverlay.NinDS.Accent.Blue" parent="">
+        <item name="colorPrimary">@color/accent_blue_primary</item>
+        <item name="colorOnPrimary">@color/accent_blue_on_primary</item>
+        <item name="colorPrimaryContainer">@color/accent_blue_container</item>
+        <item name="colorOnPrimaryContainer">@color/accent_blue_on_container</item>
+        <item name="colorSecondaryContainer">@color/accent_blue_container</item>
+        <item name="colorOnSecondaryContainer">@color/accent_blue_on_container</item>
+    </style>
+    <style name="ThemeOverlay.NinDS.Accent.Purple" parent="">
+        <item name="colorPrimary">@color/accent_purple_primary</item>
+        <item name="colorOnPrimary">@color/accent_purple_on_primary</item>
+        <item name="colorPrimaryContainer">@color/accent_purple_container</item>
+        <item name="colorOnPrimaryContainer">@color/accent_purple_on_container</item>
+        <item name="colorSecondaryContainer">@color/accent_purple_container</item>
+        <item name="colorOnSecondaryContainer">@color/accent_purple_on_container</item>
+    </style>
+    <style name="ThemeOverlay.NinDS.Accent.Green" parent="">
+        <item name="colorPrimary">@color/accent_green_primary</item>
+        <item name="colorOnPrimary">@color/accent_green_on_primary</item>
+        <item name="colorPrimaryContainer">@color/accent_green_container</item>
+        <item name="colorOnPrimaryContainer">@color/accent_green_on_container</item>
+        <item name="colorSecondaryContainer">@color/accent_green_container</item>
+        <item name="colorOnSecondaryContainer">@color/accent_green_on_container</item>
+    </style>
+    <style name="ThemeOverlay.NinDS.Accent.Orange" parent="">
+        <item name="colorPrimary">@color/accent_orange_primary</item>
+        <item name="colorOnPrimary">@color/accent_orange_on_primary</item>
+        <item name="colorPrimaryContainer">@color/accent_orange_container</item>
+        <item name="colorOnPrimaryContainer">@color/accent_orange_on_container</item>
+        <item name="colorSecondaryContainer">@color/accent_orange_container</item>
+        <item name="colorOnSecondaryContainer">@color/accent_orange_on_container</item>
+    </style>
+    <style name="ThemeOverlay.NinDS.Accent.Pink" parent="">
+        <item name="colorPrimary">@color/accent_pink_primary</item>
+        <item name="colorOnPrimary">@color/accent_pink_on_primary</item>
+        <item name="colorPrimaryContainer">@color/accent_pink_container</item>
+        <item name="colorOnPrimaryContainer">@color/accent_pink_on_container</item>
+        <item name="colorSecondaryContainer">@color/accent_pink_container</item>
+        <item name="colorOnSecondaryContainer">@color/accent_pink_on_container</item>
+    </style>
+    <style name="ThemeOverlay.NinDS.Accent.Teal" parent="">
+        <item name="colorPrimary">@color/accent_teal_primary</item>
+        <item name="colorOnPrimary">@color/accent_teal_on_primary</item>
+        <item name="colorPrimaryContainer">@color/accent_teal_container</item>
+        <item name="colorOnPrimaryContainer">@color/accent_teal_on_container</item>
+        <item name="colorSecondaryContainer">@color/accent_teal_container</item>
+        <item name="colorOnSecondaryContainer">@color/accent_teal_on_container</item>
+    </style>
+    <style name="ThemeOverlay.NinDS.Accent.Gold" parent="">
+        <item name="colorPrimary">@color/accent_gold_primary</item>
+        <item name="colorOnPrimary">@color/accent_gold_on_primary</item>
+        <item name="colorPrimaryContainer">@color/accent_gold_container</item>
+        <item name="colorOnPrimaryContainer">@color/accent_gold_on_container</item>
+        <item name="colorSecondaryContainer">@color/accent_gold_container</item>
+        <item name="colorOnSecondaryContainer">@color/accent_gold_on_container</item>
+    </style>
+
+    <!-- Black (AMOLED): the dark theme with true-black backgrounds. -->
+    <style name="ThemeOverlay.NinDS.Black" parent="">
+        <item name="android:colorBackground">@android:color/black</item>
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="colorSurface">@android:color/black</item>
+        <item name="colorSurfaceContainerLowest">@android:color/black</item>
+        <item name="colorSurfaceContainerLow">#0B0B0C</item>
+        <item name="colorSurfaceContainer">#111113</item>
+        <item name="colorSurfaceContainerHigh">#18181B</item>
+        <item name="colorSurfaceContainerHighest">#202024</item>
+        <item name="nindsCardColor">#121214</item>
     </style>
 </resources>

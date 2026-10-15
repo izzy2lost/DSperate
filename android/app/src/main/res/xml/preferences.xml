@@ -156,6 +156,9 @@
             app:iconSpaceReserved="false"
             app:key="show_fps"
             app:title="@string/pref_show_fps" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="@string/pref_cat_appearance" app:iconSpaceReserved="false">
         <ListPreference
             app:defaultValue="system"
             app:entries="@array/theme_entries"
@@ -163,6 +166,14 @@
             app:iconSpaceReserved="false"
             app:key="theme"
             app:title="@string/pref_theme"
+            app:useSimpleSummaryProvider="true" />
+        <ListPreference
+            app:defaultValue="red"
+            app:entries="@array/accent_entries"
+            app:entryValues="@array/accent_values"
+            app:iconSpaceReserved="false"
+            app:key="accent"
+            app:title="@string/pref_accent"
             app:useSimpleSummaryProvider="true" />
     </PreferenceCategory>
 
@@ -182,6 +193,21 @@
     </PreferenceCategory>
 
     <PreferenceCategory app:title="@string/pref_cat_controls" app:iconSpaceReserved="false">
+        <ListPreference
+            app:defaultValue="classic"
+            app:entries="@array/skin_entries"
+            app:entryValues="@array/skin_values"
+            app:iconSpaceReserved="false"
+            app:key="controls_skin"
+            app:title="@string/pref_skin"
+            app:useSimpleSummaryProvider="true" />
+        <SwitchPreferenceCompat
+            app:defaultValue="false"
+            app:iconSpaceReserved="false"
+            app:key="face_colours"
+            app:summary="@string/pref_face_colours_summary"
+            app:title="@string/pref_face_colours" />
+        <com.izzy2lost.ninds.ControlsPreviewPreference app:key="controls_preview" />
         <SwitchPreferenceCompat
             app:defaultValue="true"
             app:iconSpaceReserved="false"

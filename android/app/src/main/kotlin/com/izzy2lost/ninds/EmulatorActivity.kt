@@ -247,6 +247,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         controls.opacity = settings.controlsOpacity / 100f
         controls.scale = settings.controlsScale / 100f
         controls.haptics = settings.haptics
+        controls.skin = ControlSkins.get(this, settings.controlsSkin)
+        controls.faceColours = settings.faceColours
         updateControlsVisibility()
         binding.fpsText.visibility = if (settings.showFps) View.VISIBLE else View.GONE
         if (!booted) return
@@ -296,6 +298,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         val p = ScreenLayout.compute(w, h, currentLayoutMode(), settings.swapScreens, settings.integerScale, gap, reserve)
         controls.portraitBandTop = if (portrait) h - reserve else 0
         controls.touchScreenRect = if (p.bottomShown) p.bottom else null
+        controls.screenRects = listOfNotNull(p.top.takeIf { p.topShown }, p.bottom.takeIf { p.bottomShown }).distinct()
         controls.relayout()
         if (booted) {
             NativeLib.nativeSetLayout(

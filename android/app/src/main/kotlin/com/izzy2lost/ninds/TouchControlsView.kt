@@ -4,12 +4,15 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import androidx.core.graphics.ColorUtils
 import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.min
@@ -36,8 +39,19 @@ class TouchControlsView(context: Context) : View(context) {
     var suspended = false
         set(value) { field = value; if (value) releaseAll() }
 
+    var skin: ControlSkin = ControlSkins.get(context, ControlSkins.CLASSIC)
+        set(value) { field = value; shellShader = null; invalidate() }
+    /** SNES-style coloured A/B/X/Y over the skin's own. */
+    var faceColours = false
+        set(value) { field = value; invalidate() }
+    /** Settings preview: lay out as portrait over the whole view, with no screens. */
+    var preview = false
+
     /** Where the DS bottom screen is, in this view's pixels; null when it is not shown. */
     var touchScreenRect: Rect? = null
+    /** Every DS screen shown, cut out of the console shell. */
+    var screenRects: List<Rect> = emptyList()
+        set(value) { field = value; invalidate() }
     /** Portrait keeps the controls in this band at the bottom (the screens sit above it). */
     var portraitBandTop = 0
 
@@ -75,6 +89,9 @@ class TouchControlsView(context: Context) : View(context) {
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER; isFakeBoldText = true }
+    private val shellPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private var shellShader: LinearGradient? = null
+    private val bezelPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
     init {
         isClickable = true
@@ -85,14 +102,17 @@ class TouchControlsView(context: Context) : View(context) {
         invalidate()
     }
 
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) = layoutControls(w, h)
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        shellShader = null
+        layoutControls(w, h)
+    }
 
     fun relayout() = requestLayoutControls()
 
     private fun layoutControls(w: Int, h: Int) {
         val u = density * scale
-        val portrait = h > w
-        val bandTop = if (portrait) portraitBandTop.toFloat().coerceIn(0f, h * 0.8f) else 0f
+        val portrait = h > w || preview
+        val bandTop = if (portrait && !preview) portraitBandTop.toFloat().coerceIn(0f, h * 0.8f) else 0f
         val bandH = h - bandTop
         fun at(fx: Float, fy: Float) = floatArrayOf(w * fx, bandTop + bandH * fy)
         fun place(c: Control, cx: Float, cy: Float, rw: Float, rh: Float, round: Boolean) {
@@ -149,26 +169,36 @@ class TouchControlsView(context: Context) : View(context) {
         }
     }
 
+    /** The skin paints a console body here: portrait (or the preview) with the controls up. */
+    private fun shellShown() = skin.shell != null && controlsVisible && (preview || height > width)
+
     override fun onDraw(canvas: Canvas) {
         if (!controlsVisible) {
             // The menu stays reachable with the controls hidden.
             drawButton(canvas, buttons.first { it.id == "menu" }, 0.35f)
             return
         }
-        val a = opacity
+        val shell = shellShown()
+        if (shell) drawShell(canvas)
+        // Over the game the controls are see-through; on the console body they are solid.
+        val a = if (shell) 1f else opacity
+        if (skin.glow) stroke.setShadowLayer(6 * density, 0f, 0f, skin.stroke) else stroke.clearShadowLayer()
         // D-pad: a cross with the held directions lit.
         val cx = dpadBounds.centerX()
         val cy = dpadBounds.centerY()
         val r = dpadBounds.width() / 2
         val arm = r * 0.36f
-        fill.color = Color.argb((a * 150).toInt(), 30, 30, 34)
-        stroke.color = Color.argb((a * 255).toInt(), 235, 235, 240)
+        fill.color = withAlpha(skin.dpadFill, a)
+        stroke.color = withAlpha(skin.stroke, a)
         stroke.strokeWidth = 2 * density
-        canvas.drawRoundRect(cx - arm, cy - r, cx + arm, cy + r, 8 * density, 8 * density, fill)
-        canvas.drawRoundRect(cx - r, cy - arm, cx + r, cy + arm, 8 * density, 8 * density, fill)
-        canvas.drawRoundRect(cx - arm, cy - r, cx + arm, cy + r, 8 * density, 8 * density, stroke)
-        canvas.drawRoundRect(cx - r, cy - arm, cx + r, cy + arm, 8 * density, 8 * density, stroke)
-        fill.color = Color.argb((a * 230).toInt(), 255, 255, 255)
+        val corner = 8 * density
+        val cross = Path().apply {
+            addRoundRect(cx - arm, cy - r, cx + arm, cy + r, corner, corner, Path.Direction.CW)
+            op(Path().apply { addRoundRect(cx - r, cy - arm, cx + r, cy + arm, corner, corner, Path.Direction.CW) }, Path.Op.UNION)
+        }
+        canvas.drawPath(cross, fill)
+        canvas.drawPath(cross, stroke)
+        fill.color = withAlpha(skin.pressedFill, a)
         fun lit(bit: Int, l: Float, t: Float, rr: Float, b: Float) {
             if (dpadMask and (1 shl bit) != 0) canvas.drawRoundRect(l, t, rr, b, 6 * density, 6 * density, fill)
         }
@@ -184,10 +214,48 @@ class TouchControlsView(context: Context) : View(context) {
         }
     }
 
+    /** The console body: a gradient shell with a bezel round each screen and the screens cut out. */
+    private fun drawShell(canvas: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val top = skin.shell!!
+        val shader = shellShader ?: LinearGradient(0f, 0f, 0f, h, top, skin.shellShade ?: top, android.graphics.Shader.TileMode.CLAMP)
+            .also { shellShader = it }
+        val inset = 6 * density
+        val round = 10 * density
+        val shown = if (preview) emptyList() else screenRects
+        canvas.save()
+        for (r in shown) canvas.clipOutRect(r)
+        shellPaint.shader = shader
+        canvas.drawRect(0f, 0f, w, h, shellPaint)
+        bezelPaint.color = skin.bezel
+        for (r in shown) canvas.drawRoundRect(r.left - inset, r.top - inset, r.right + inset, r.bottom + inset, round, round, bezelPaint)
+        canvas.restore()
+        // The hinge: where the clamshell would fold, just above the controls.
+        if (!preview && portraitBandTop > 0) {
+            val y = portraitBandTop.toFloat()
+            bezelPaint.color = ColorUtils.setAlphaComponent(Color.BLACK, 70)
+            canvas.drawRect(0f, y, w, y + 3 * density, bezelPaint)
+            bezelPaint.color = ColorUtils.setAlphaComponent(Color.WHITE, 50)
+            canvas.drawRect(0f, y + 3 * density, w, y + 4 * density, bezelPaint)
+        }
+    }
+
+    private fun withAlpha(colour: Int, a: Float) = ColorUtils.setAlphaComponent(colour, (Color.alpha(colour) * a).toInt().coerceIn(0, 255))
+
     private fun drawButton(canvas: Canvas, c: Control, a: Float, lit: Boolean = c.pressed) {
         val b = c.bounds
-        fill.color = if (lit) Color.argb((a * 235).toInt(), 255, 255, 255) else Color.argb((a * 150).toInt(), 30, 30, 34)
-        stroke.color = Color.argb((a * 255).toInt(), 235, 235, 240)
+        val isFace = c in face
+        val tint = if (isFace && faceColours) ControlSkins.FACE_COLOURS[c.id] else if (isFace) skin.faceFill else null
+        fill.color = withAlpha(
+            when {
+                lit && tint != null -> ColorUtils.blendARGB(tint, Color.WHITE, 0.45f)
+                lit -> skin.pressedFill
+                tint != null -> tint
+                else -> skin.fill
+            }, a,
+        )
+        stroke.color = withAlpha(if (tint != null && !skin.glow) ColorUtils.blendARGB(tint, Color.BLACK, 0.3f) else skin.stroke, a)
         stroke.strokeWidth = 2 * density
         if (c.round) {
             canvas.drawCircle(b.centerX(), b.centerY(), b.width() / 2, fill)
@@ -197,7 +265,14 @@ class TouchControlsView(context: Context) : View(context) {
             canvas.drawRoundRect(b, rad, rad, fill)
             canvas.drawRoundRect(b, rad, rad, stroke)
         }
-        text.color = if (lit) Color.argb((a * 255).toInt(), 20, 20, 24) else Color.argb((a * 255).toInt(), 245, 245, 250)
+        val labelColour = when {
+            tint != null && lit -> ColorUtils.blendARGB(tint, Color.BLACK, 0.55f)
+            tint != null -> if (faceColours) Color.WHITE else skin.faceLabel ?: skin.label
+            lit -> skin.pressedLabel
+            else -> skin.label
+        }
+        text.color = withAlpha(labelColour, a)
+        if (skin.glow && !lit) text.setShadowLayer(5 * density, 0f, 0f, skin.label) else text.clearShadowLayer()
         text.textSize = min(b.height() * 0.42f, if (c.label.length > 3) b.width() / (c.label.length * 0.62f) else b.height())
         canvas.drawText(c.label, b.centerX(), b.centerY() - (text.descent() + text.ascent()) / 2, text)
     }

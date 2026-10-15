@@ -8,4 +8,34 @@
     <color name="ninds_background">#121316</color>
     <color name="ninds_surface">#1A1B1F</color>
     <color name="ninds_card">#22242A</color>
+
+    <!-- Accent palettes, dark tones. -->
+    <color name="accent_blue_primary">#9ECAFF</color>
+    <color name="accent_blue_on_primary">#003258</color>
+    <color name="accent_blue_container">#00497D</color>
+    <color name="accent_blue_on_container">#D1E4FF</color>
+    <color name="accent_purple_primary">#D0BCFF</color>
+    <color name="accent_purple_on_primary">#381E72</color>
+    <color name="accent_purple_container">#4F378B</color>
+    <color name="accent_purple_on_container">#EADDFF</color>
+    <color name="accent_green_primary">#78DC77</color>
+    <color name="accent_green_on_primary">#00390A</color>
+    <color name="accent_green_container">#005313</color>
+    <color name="accent_green_on_container">#94F990</color>
+    <color name="accent_orange_primary">#FFB870</color>
+    <color name="accent_orange_on_primary">#4A2800</color>
+    <color name="accent_orange_container">#6A3C00</color>
+    <color name="accent_orange_on_container">#FFDCBE</color>
+    <color name="accent_pink_primary">#FFB0C8</color>
+    <color name="accent_pink_on_primary">#5E1133</color>
+    <color name="accent_pink_container">#7B2949</color>
+    <color name="accent_pink_on_container">#FFD9E2</color>
+    <color name="accent_teal_primary">#4CDADA</color>
+    <color name="accent_teal_on_primary">#003737</color>
+    <color name="accent_teal_container">#004F4F</color>
+    <color name="accent_teal_on_container">#6FF7F6</color>
+    <color name="accent_gold_primary">#DBC66E</color>
+    <color name="accent_gold_on_primary">#3A3000</color>
+    <color name="accent_gold_container">#534600</color>
+    <color name="accent_gold_on_container">#F8E287</color>
 </resources>

@@ -9,4 +9,34 @@
     <color name="ninds_surface">#FFFFFF</color>
     <color name="ninds_card">#FFFFFF</color>
     <color name="ic_launcher_background">#C62828</color>
+
+    <!-- Accent palettes (Settings > Appearance); red is the base theme's own. -->
+    <color name="accent_blue_primary">#0061A4</color>
+    <color name="accent_blue_on_primary">#FFFFFF</color>
+    <color name="accent_blue_container">#D1E4FF</color>
+    <color name="accent_blue_on_container">#001D36</color>
+    <color name="accent_purple_primary">#6750A4</color>
+    <color name="accent_purple_on_primary">#FFFFFF</color>
+    <color name="accent_purple_container">#EADDFF</color>
+    <color name="accent_purple_on_container">#21005D</color>
+    <color name="accent_green_primary">#006E1C</color>
+    <color name="accent_green_on_primary">#FFFFFF</color>
+    <color name="accent_green_container">#94F990</color>
+    <color name="accent_green_on_container">#002204</color>
+    <color name="accent_orange_primary">#8B5000</color>
+    <color name="accent_orange_on_primary">#FFFFFF</color>
+    <color name="accent_orange_container">#FFDCBE</color>
+    <color name="accent_orange_on_container">#2C1600</color>
+    <color name="accent_pink_primary">#984061</color>
+    <color name="accent_pink_on_primary">#FFFFFF</color>
+    <color name="accent_pink_container">#FFD9E2</color>
+    <color name="accent_pink_on_container">#3E001D</color>
+    <color name="accent_teal_primary">#006A6A</color>
+    <color name="accent_teal_on_primary">#FFFFFF</color>
+    <color name="accent_teal_container">#6FF7F6</color>
+    <color name="accent_teal_on_container">#002020</color>
+    <color name="accent_gold_primary">#6D5E00</color>
+    <color name="accent_gold_on_primary">#FFFFFF</color>
+    <color name="accent_gold_container">#F8E287</color>
+    <color name="accent_gold_on_container">#211B00</color>
 </resources>

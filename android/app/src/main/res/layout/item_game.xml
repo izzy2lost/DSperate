@@ -7,7 +7,7 @@
     android:layout_margin="6dp"
     android:clickable="true"
     android:focusable="true"
-    app:cardBackgroundColor="@color/ninds_card"
+    app:cardBackgroundColor="?attr/nindsCardColor"
     app:cardCornerRadius="16dp">
 
     <LinearLayout

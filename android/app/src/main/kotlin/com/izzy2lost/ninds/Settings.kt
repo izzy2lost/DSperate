@@ -98,6 +98,9 @@ class Settings private constructor(private val file: File) {
     val favouriteColour get() = getString(COLOUR, "0").toIntOrNull() ?: 0
     val language get() = getString(LANGUAGE, "1").toIntOrNull() ?: 1
     val theme get() = getString(THEME, "system")
+    val accent get() = getString(ACCENT, "red")
+    val controlsSkin get() = getString(CONTROLS_SKIN, ControlSkins.CLASSIC)
+    val faceColours get() = getBoolean(FACE_COLOURS, false)
 
     var libraryCovers: Boolean
         get() = getBoolean(LIBRARY_COVERS, false)
@@ -152,6 +155,9 @@ class Settings private constructor(private val file: File) {
         const val COLOUR = "colour"
         const val LANGUAGE = "language"
         const val THEME = "theme"
+        const val ACCENT = "accent"
+        const val CONTROLS_SKIN = "controls_skin"
+        const val FACE_COLOURS = "face_colours"
         const val LIBRARY_COVERS = "library_covers"
 
         @Volatile

@@ -121,6 +121,11 @@
     <string name="pref_orientation">Orientation</string>
     <string name="pref_show_fps">Show FPS</string>
     <string name="pref_theme">App theme</string>
+    <string name="pref_cat_appearance">Appearance</string>
+    <string name="pref_accent">Accent colour</string>
+    <string name="pref_skin">Controls skin</string>
+    <string name="pref_face_colours">Coloured A/B/X/Y</string>
+    <string name="pref_face_colours_summary">Red, yellow, blue and green face buttons, whatever the skin</string>
 
     <string name="pref_cat_audio">Audio</string>
     <string name="pref_audio">Sound</string>

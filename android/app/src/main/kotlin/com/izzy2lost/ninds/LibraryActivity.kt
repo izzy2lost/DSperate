@@ -38,6 +38,7 @@ class LibraryActivity : AppCompatActivity() {
     private var query = ""
     private var scanning = false
     private var pendingSaveGame: Game? = null
+    private val themeGeneration = NinDSApp.themeGeneration
 
     private val pickFolder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri == null) return@registerForActivityResult
@@ -136,6 +137,12 @@ class LibraryActivity : AppCompatActivity() {
         worker.shutdown()
         downloader.shutdownNow()
         super.onDestroy()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // The accent or black theme changed in Settings: pick it up.
+        if (themeGeneration != NinDSApp.themeGeneration) recreate()
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {

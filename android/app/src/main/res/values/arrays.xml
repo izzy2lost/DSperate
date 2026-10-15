@@ -96,11 +96,63 @@
         <item>Follow the system</item>
         <item>Light</item>
         <item>Dark</item>
+        <item>Black (AMOLED)</item>
     </string-array>
     <string-array name="theme_values" translatable="false">
         <item>system</item>
         <item>light</item>
         <item>dark</item>
+        <item>black</item>
+    </string-array>
+
+    <string-array name="accent_entries">
+        <item>NinDS red</item>
+        <item>Blue</item>
+        <item>Purple</item>
+        <item>Green</item>
+        <item>Orange</item>
+        <item>Pink</item>
+        <item>Teal</item>
+        <item>Gold</item>
+        <item>From wallpaper (Android 12+)</item>
+    </string-array>
+    <string-array name="accent_values" translatable="false">
+        <item>red</item>
+        <item>blue</item>
+        <item>purple</item>
+        <item>green</item>
+        <item>orange</item>
+        <item>pink</item>
+        <item>teal</item>
+        <item>gold</item>
+        <item>wallpaper</item>
+    </string-array>
+
+    <string-array name="skin_entries">
+        <item>Classic (see-through)</item>
+        <item>Neon</item>
+        <item>Polar White</item>
+        <item>Onyx Black</item>
+        <item>Cobalt Blue</item>
+        <item>Crimson</item>
+        <item>Coral Pink</item>
+        <item>Ice Blue</item>
+        <item>Famicom</item>
+        <item>Brick (original handheld)</item>
+        <item>Match the app accent</item>
+    </string-array>
+    <string-array name="skin_values" translatable="false">
+        <item>classic</item>
+        <item>neon</item>
+        <item>polar_white</item>
+        <item>onyx</item>
+        <item>cobalt</item>
+        <item>crimson</item>
+        <item>coral_pink</item>
+        <item>ice_blue</item>
+        <item>famicom</item>
+        <item>brick</item>
+        <item>accent</item>
     </string-array>
 
     <string-array name="month_entries">

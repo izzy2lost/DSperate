@@ -115,9 +115,18 @@ class SettingsActivity : AppCompatActivity() {
                 toast(getString(R.string.cache_cleared, freed / (1024 * 1024)))
                 true
             }
-            findPreference<ListPreference>(Settings.THEME)?.setOnPreferenceChangeListener { _, value ->
-                AppCompatDelegate.setDefaultNightMode(NinDSApp.nightMode(value as String))
-                true
+            // Applied once the new value is stored: the recreated activities read it as they start.
+            fun restyle(theme: String) = listView.post {
+                NinDSApp.themeGeneration++
+                val mode = NinDSApp.nightMode(theme)
+                if (mode != AppCompatDelegate.getDefaultNightMode()) AppCompatDelegate.setDefaultNightMode(mode)
+                else requireActivity().recreate()
+            }
+            findPreference<ListPreference>(Settings.THEME)?.setOnPreferenceChangeListener { _, value -> restyle(value as String); true }
+            findPreference<ListPreference>(Settings.ACCENT)?.setOnPreferenceChangeListener { _, _ -> restyle(settings.theme); true }
+            val preview = findPreference<ControlsPreviewPreference>("controls_preview")
+            for (key in listOf(Settings.CONTROLS_SKIN, Settings.FACE_COLOURS)) {
+                findPreference<Preference>(key)?.setOnPreferenceChangeListener { _, _ -> listView.post { preview?.refresh() }; true }
             }
             findPreference<EditTextPreference>(Settings.NICKNAME)?.setOnBindEditTextListener {
                 it.filters = arrayOf(android.text.InputFilter.LengthFilter(10))
