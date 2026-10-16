@@ -14,7 +14,8 @@
             android:layout_width="match_parent"
             android:layout_height="?attr/actionBarSize"
             app:title="@string/app_name"
-            app:titleTextAppearance="?attr/textAppearanceTitleLarge" />
+            app:titleTextAppearance="?attr/textAppearanceTitleLarge"
+            app:titleTextColor="?attr/colorPrimary" />
 
         <!-- A one-line tip above the games; closing it hides it for good. -->
         <com.google.android.material.card.MaterialCardView
