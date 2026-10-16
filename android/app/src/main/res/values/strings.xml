@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="library_tip">Long-press a game for more options</string>
+    <string name="library_tip_close">Hide this tip</string>
     <string name="app_name">NinDS</string>
 
     <!-- Library -->

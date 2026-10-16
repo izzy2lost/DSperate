@@ -112,6 +112,10 @@ class LibraryActivity : AppCompatActivity() {
             insets
         }
 
+        binding.libraryTipClose.setOnClickListener {
+            settings.libraryTipDismissed = true
+            binding.libraryTip.visibility = View.GONE
+        }
         binding.gameList.layoutManager = GridLayoutManager(this, spanCount())
         binding.gameList.adapter = adapter
         binding.refresh.setOnRefreshListener { rescan() }
@@ -231,6 +235,7 @@ class LibraryActivity : AppCompatActivity() {
         autoDownloadCovers()
         val noFolder = settings.romTreeUri.isEmpty()
         binding.emptyState.visibility = if (games.isEmpty() && !scanning) View.VISIBLE else View.GONE
+        binding.libraryTip.visibility = if (games.isNotEmpty() && !settings.libraryTipDismissed) View.VISIBLE else View.GONE
         binding.emptyText.setText(if (noFolder) R.string.library_empty_no_folder else R.string.library_empty_no_games)
         binding.chooseFolderButton.setText(if (noFolder) R.string.choose_folder else R.string.choose_other_folder)
     }

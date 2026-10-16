@@ -15,6 +15,54 @@
             android:layout_height="?attr/actionBarSize"
             app:title="@string/app_name"
             app:titleTextAppearance="?attr/textAppearanceTitleLarge" />
+
+        <!-- A one-line tip above the games; closing it hides it for good. -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/libraryTip"
+            style="@style/Widget.Material3.CardView.Filled"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="12dp"
+            android:layout_marginBottom="8dp"
+            android:visibility="gone"
+            app:cardBackgroundColor="?attr/colorSecondaryContainer"
+            app:cardCornerRadius="12dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingVertical="4dp"
+                android:paddingStart="12dp"
+                android:paddingEnd="4dp">
+
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:contentDescription="@null"
+                    android:src="@drawable/ic_lightbulb"
+                    app:tint="@color/tip_bulb" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:text="@string/library_tip"
+                    android:textAppearance="?attr/textAppearanceBodyMedium"
+                    android:textColor="?attr/colorOnSecondaryContainer" />
+
+                <ImageButton
+                    android:id="@+id/libraryTipClose"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="@string/library_tip_close"
+                    android:src="@drawable/ic_close"
+                    app:tint="?attr/colorOnSecondaryContainer" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
     </com.google.android.material.appbar.AppBarLayout>
 
     <androidx.swiperefreshlayout.widget.SwipeRefreshLayout

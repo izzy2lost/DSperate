@@ -104,6 +104,10 @@ class Settings private constructor(private val file: File) {
     val controlsSkin get() = getString(CONTROLS_SKIN, ControlSkins.CLASSIC)
     val faceColours get() = getBoolean(FACE_COLOURS, false)
 
+    var libraryTipDismissed: Boolean
+        get() = getBoolean(LIBRARY_TIP_DISMISSED, false)
+        set(value) = put(LIBRARY_TIP_DISMISSED, value)
+
     var libraryCovers: Boolean
         get() = getBoolean(LIBRARY_COVERS, false)
         set(value) = put(LIBRARY_COVERS, value)
@@ -162,6 +166,7 @@ class Settings private constructor(private val file: File) {
         const val CONTROLS_SKIN = "controls_skin"
         const val FACE_COLOURS = "face_colours"
         const val LIBRARY_COVERS = "library_covers"
+        const val LIBRARY_TIP_DISMISSED = "library_tip_dismissed"
 
         @Volatile
         private var instance: Settings? = null
