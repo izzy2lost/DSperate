@@ -77,7 +77,7 @@ class Settings private constructor(private val file: File) {
         set(value) = put(SWAP_SCREENS, value)
     val filter get() = getString(FILTER, "2").toIntOrNull() ?: 2
     val integerScale get() = getBoolean(INTEGER_SCALE, false)
-    val screenGap get() = getInt(SCREEN_GAP, 0)
+    val screenGap get() = getInt(SCREEN_GAP, 5)
     val showFps get() = getBoolean(SHOW_FPS, false)
     val orientation get() = getString(ORIENTATION, "sensor")
 

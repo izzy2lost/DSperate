@@ -138,7 +138,7 @@
             app:title="@string/pref_integer" />
         <SeekBarPreference
             android:max="48"
-            app:defaultValue="0"
+            app:defaultValue="5"
             app:iconSpaceReserved="false"
             app:key="screen_gap"
             app:showSeekBarValue="true"
