@@ -66,7 +66,7 @@ class LibraryActivity : AppCompatActivity() {
                 }
                 games = library.cached()
                 render()
-                launch(game)
+                play(game)
             }
         }
     }
@@ -98,7 +98,7 @@ class LibraryActivity : AppCompatActivity() {
         library = GameLibrary(this)
         paths = AppPaths(this)
         covers = Covers(this)
-        adapter = GameAdapter(covers, ::launch, ::showGameOptions)
+        adapter = GameAdapter(covers, ::play, ::showGameOptions)
         adapter.showCovers = settings.libraryCovers
         binding = ActivityLibraryBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -303,6 +303,28 @@ class LibraryActivity : AppCompatActivity() {
     }
 
     private fun launch(game: Game) = startActivity(EmulatorActivity.intent(this, game))
+
+    /**
+     * A tap on a game. With an automatic save from last time, asks first: starting fresh by
+     * accident would leave the player wondering where their session went.
+     */
+    private fun play(game: Game) {
+        val auto = SaveStateSlot(paths.stateDir(game.stem), SaveStateSlot.AUTO)
+        if (!auto.exists) { launch(game); return }
+        val savedAgo = android.text.format.DateUtils.getRelativeTimeSpanString(
+            auto.savedAt, System.currentTimeMillis(), android.text.format.DateUtils.MINUTE_IN_MILLIS,
+        )
+        val content = layoutInflater.inflate(R.layout.dialog_continue, null, false)
+        auto.decodeThumbnail()?.let { content.findViewById<android.widget.ImageView>(R.id.continueThumbnail).setImageBitmap(it) }
+            ?: run { content.findViewById<View>(R.id.continueThumbnail).visibility = View.GONE }
+        content.findViewById<android.widget.TextView>(R.id.continueWhen).text = getString(R.string.continue_saved, savedAgo)
+        MaterialAlertDialogBuilder(this)
+            .setTitle(adapter.titleOf(game))
+            .setView(content)
+            .setPositiveButton(R.string.continue_yes) { _, _ -> startActivity(EmulatorActivity.intent(this, game, SaveStateSlot.AUTO)) }
+            .setNegativeButton(R.string.continue_no) { _, _ -> launch(game) }
+            .show()
+    }
 
     private fun showGameOptions(game: Game) {
         val auto = SaveStateSlot(paths.stateDir(game.stem), SaveStateSlot.AUTO)

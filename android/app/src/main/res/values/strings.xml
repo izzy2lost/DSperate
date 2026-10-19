@@ -61,6 +61,10 @@
     <string name="scanning_progress">Scanning %1$d of %2$d</string>
     <string name="scan_failed">Could not read the folder: %1$s</string>
     <string name="game_play">Play</string>
+    <string name="continue_question">Pick up where you left off?</string>
+    <string name="continue_saved">Saved %1$s</string>
+    <string name="continue_yes">Continue</string>
+    <string name="continue_no">Start fresh</string>
     <string name="game_resume">Resume where you left off</string>
     <string name="game_import_save">Import save file…</string>
     <string name="game_export_save">Export save file…</string>
