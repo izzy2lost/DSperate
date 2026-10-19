@@ -4,6 +4,9 @@
 // The emulator runs in its own process (":emu"), one game per process, so a
 // single global session is all there ever is.
 #include "session.h"
+#include "http_jni.h"
+
+#include "cheevos/cheevos_client.h"
 
 #include <android/log.h>
 #include <android/native_window_jni.h>
@@ -67,8 +70,10 @@ void forward_stderr() {
 
 } // namespace
 
-extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM*, void*) {
+extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void*) {
   forward_stderr();
+  JNIEnv* env = nullptr;
+  if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_OK) ninds::http_jni_init(vm, env);
   return JNI_VERSION_1_6;
 }
 
@@ -77,7 +82,7 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM*, void*) {
 JNI_FN(jstring, nativeBoot)(JNIEnv* env, jobject, jint rom_fd, jstring rom_name, jstring save_path, jstring cache_dir,
                             jstring bios_dir, jboolean firmware_boot, jboolean jit, jboolean fast_timing, jboolean gpu3d,
                             jint gpu_scale, jboolean tex_filter, jboolean aa, jstring net_mode, jstring lan_address, jboolean audio, jint volume, jstring nickname, jstring message,
-                            jint birthday_month, jint birthday_day, jint colour, jint language) {
+                            jint birthday_month, jint birthday_day, jint colour, jint language, jstring cheevos_user, jstring cheevos_token) {
   if (g_session) { g_session->stop(); g_session.reset(); }
   ninds::SessionConfig cfg;
   cfg.rom_fd = rom_fd;
@@ -95,6 +100,8 @@ JNI_FN(jstring, nativeBoot)(JNIEnv* env, jobject, jint rom_fd, jstring rom_name,
   cfg.net_mode = str(env, net_mode);
   cfg.lan_address = str(env, lan_address);
   cfg.audio = audio;
+  cfg.cheevos_user = str(env, cheevos_user);
+  cfg.cheevos_token = str(env, cheevos_token);
   cfg.volume = volume;
   const std::string nick = str(env, nickname);
   if (!nick.empty()) cfg.user.nickname = nick.substr(0, 10);
@@ -107,6 +114,40 @@ JNI_FN(jstring, nativeBoot)(JNIEnv* env, jobject, jint rom_fd, jstring rom_name,
   const std::string err = g_session->boot(cfg);
   if (!err.empty()) g_session.reset();
   return jstr(env, err);
+}
+
+namespace {
+jobjectArray jstrings(JNIEnv* env, const std::vector<std::string>& v) {
+  jobjectArray out = env->NewObjectArray(static_cast<jsize>(v.size()), env->FindClass("java/lang/String"), nullptr);
+  for (size_t i = 0; i < v.size(); ++i) {
+    jstring s = jstr(env, v[i]);
+    env->SetObjectArrayElement(out, static_cast<jsize>(i), s);
+    env->DeleteLocalRef(s);
+  }
+  return out;
+}
+} // namespace
+
+JNI_FN(jobjectArray, nativeCheevosMessages)(JNIEnv* env, jobject) {
+  auto* s = session();
+  return jstrings(env, s ? s->cheevos_messages() : std::vector<std::string>{});
+}
+
+JNI_FN(jobjectArray, nativeCheevosList)(JNIEnv* env, jobject) {
+  auto* s = session();
+  return jstrings(env, s ? s->cheevos_list() : std::vector<std::string>{"off"});
+}
+
+// Settings' sign-in: blocking, off the UI thread. Returns {username, token, display name, score}
+// on success, {"", error} on failure. No session is needed.
+JNI_FN(jobjectArray, nativeCheevosLogin)(JNIEnv* env, jobject, jstring user, jstring password) {
+  auto http = ninds::make_jni_backend();
+  ds::cheevos::Credentials cred;
+  std::string display, err;
+  ds::u32 score = 0;
+  if (ds::cheevos::login_with_password(*http, str(env, user), str(env, password), cred, display, score, err))
+    return jstrings(env, {cred.username, cred.token, display, std::to_string(score)});
+  return jstrings(env, {"", err});
 }
 
 JNI_FN(jstring, nativeBootNote)(JNIEnv* env, jobject) {

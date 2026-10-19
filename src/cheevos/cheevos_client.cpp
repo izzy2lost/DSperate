@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "core/nds.h"
+#include "rc_api_user.h"
 #include "rc_client.h"
 
 namespace ds::cheevos {
@@ -218,6 +219,44 @@ bool import_cfw_credentials(Credentials& out, std::string& source) {
   return false;
 }
 
+bool login_with_password(Backend& http, const std::string& username, const std::string& password,
+                         Credentials& out, std::string& display_name, u32& score, std::string& err) {
+  out = Credentials{};
+  display_name.clear();
+  score = 0;
+  err.clear();
+  rc_api_login_request_t params{};
+  params.username = username.c_str();
+  params.password = password.c_str();
+  rc_api_request_t request{};
+  if (rc_api_init_login_request(&request, &params) != RC_OK) { err = "could not build the sign-in request"; return false; }
+  Request req;
+  req.url = request.url ? request.url : "";
+  req.body = request.post_data ? request.post_data : "";
+  req.content_type = request.content_type ? request.content_type : "";
+  rc_api_destroy_request(&request);
+
+  const Response res = http.perform(req, user_agent());
+  if (res.status == 0) { err = res.error.empty() ? "could not reach RetroAchievements" : res.error; return false; }
+  rc_api_server_response_t server{};
+  server.body = res.body.c_str();
+  server.body_length = res.body.size();
+  server.http_status_code = res.status;
+  rc_api_login_response_t login{};
+  const int rc = rc_api_process_login_server_response(&login, &server);
+  const bool ok = rc == RC_OK && login.response.succeeded && login.api_token && login.username;
+  if (ok) {
+    out.username = login.username;
+    out.token = login.api_token;
+    display_name = login.display_name ? login.display_name : login.username;
+    score = login.score_softcore;
+  } else {
+    err = login.response.error_message ? login.response.error_message : "sign-in failed";
+  }
+  rc_api_destroy_login_response(&login);
+  return ok;
+}
+
 // ---------------------------------------------------------------------------
 // Session
 
@@ -236,9 +275,9 @@ bool Client::encore() const {
   return rc_client_get_encore_mode_enabled(static_cast<rc_client_t*>(client_)) != 0;
 }
 
-void Client::post(Message::Kind kind, std::string text, std::string detail, u32 points) {
+void Client::post(Message::Kind kind, std::string text, std::string detail, u32 points, std::string badge_url) {
   std::lock_guard<std::mutex> lk(mu_);
-  messages_.push_back(Message{kind, std::move(text), std::move(detail), points});
+  messages_.push_back(Message{kind, std::move(text), std::move(detail), points, std::move(badge_url)});
 }
 
 std::vector<Message> Client::take_messages() {
@@ -248,11 +287,11 @@ std::vector<Message> Client::take_messages() {
   return out;
 }
 
-bool Client::start(std::string& err) {
+bool Client::start(std::string& err, std::unique_ptr<Backend> http) {
   if (client_) return true;
   err.clear();
 
-  http_ = make_curl_backend(err);
+  http_ = http ? std::move(http) : make_curl_backend(err);
   if (!http_) {
     unavailable_ = "no HTTP support on this device (" + err + ")";
     state_ = State::Off;
@@ -495,6 +534,12 @@ std::string Client::game_title() const {
   return g && g->title ? g->title : std::string{};
 }
 
+std::string Client::game_badge_url() const {
+  if (!client_) return {};
+  const rc_client_game_t* g = rc_client_get_game_info(static_cast<rc_client_t*>(client_));
+  return g && g->badge_url ? g->badge_url : std::string{};
+}
+
 u32 Client::game_id() const {
   if (!client_) return 0;
   const rc_client_game_t* g = rc_client_get_game_info(static_cast<rc_client_t*>(client_));
@@ -538,7 +583,8 @@ void Client::on_no_set() {
 }
 
 void Client::on_game_failed(const std::string& why) {
-  state_ = State::SignedIn;
+  // A failed sign-in fails the pending load too; that must not read as signed in.
+  if (state_ != State::SignedOut) state_ = State::SignedIn;
   post(Message::Kind::Problem, "Could not load achievements", why);
 }
 
@@ -563,6 +609,8 @@ std::vector<Client::Achievement> Client::achievements() const {
       info.title = a->title ? a->title : "";
       info.description = a->description ? a->description : "";
       info.progress = a->measured_progress;
+      info.badge_url = a->badge_url ? a->badge_url : "";
+      info.badge_locked_url = a->badge_locked_url ? a->badge_locked_url : "";
       info.id = a->id;
       info.points = a->points;
       // unlocked = account holds it; active = can trigger now (both true in encore).
@@ -637,7 +685,8 @@ void Client::handle_event(const void* event_ptr) {
         self->post(Message::Kind::Unlock,
                    e->achievement->title ? e->achievement->title : "Achievement unlocked",
                    e->achievement->description ? e->achievement->description : "",
-                   e->achievement->points);
+                   e->achievement->points,
+                   e->achievement->badge_url ? e->achievement->badge_url : "");
       }
       break;
     case RC_CLIENT_EVENT_GAME_COMPLETED:

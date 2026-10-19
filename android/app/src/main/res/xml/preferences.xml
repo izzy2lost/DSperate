@@ -259,6 +259,33 @@
             app:title="@string/pref_controller_mapping" />
     </PreferenceCategory>
 
+    <PreferenceCategory app:title="@string/pref_cat_cheevos" app:iconSpaceReserved="false">
+        <Preference
+            app:icon="@drawable/ic_trophy"
+            app:key="cheevos_account"
+            app:title="@string/pref_cheevos_account" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="cheevos_sign_up"
+            app:summary="@string/pref_cheevos_sign_up_summary"
+            app:title="@string/pref_cheevos_sign_up" />
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="cheevos_enabled"
+            app:title="@string/pref_cheevos_enabled" />
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="cheevos_notifications"
+            app:summary="@string/pref_cheevos_notifications_summary"
+            app:title="@string/pref_cheevos_notifications" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:selectable="false"
+            app:summary="@string/pref_cheevos_note" />
+    </PreferenceCategory>
+
     <PreferenceCategory app:title="@string/pref_cat_system" app:iconSpaceReserved="false">
         <EditTextPreference
             app:defaultValue="NinDS"

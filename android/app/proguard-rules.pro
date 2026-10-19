@@ -8,3 +8,9 @@
 -keep class com.izzy2lost.ninds.NativeLib { *; }
 -keep interface com.izzy2lost.ninds.NativeLib$Callbacks { *; }
 -keep class * implements com.izzy2lost.ninds.NativeLib$Callbacks { *; }
+
+# RetroAchievements' HTTP: FindClass + GetStaticMethodID from native code (cpp/http_jni.cpp),
+# so R8 sees no caller and would remove or rename it ("no Java transport").
+-keep class com.izzy2lost.ninds.CheevosHttp {
+    public static byte[] perform(java.lang.String, java.lang.String, java.lang.String, java.lang.String);
+}

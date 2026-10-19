@@ -104,6 +104,31 @@ class Settings private constructor(private val file: File) {
     val controlsSkin get() = getString(CONTROLS_SKIN, ControlSkins.CLASSIC)
     val faceColours get() = getBoolean(FACE_COLOURS, false)
 
+    /**
+     * Everything a game only reads when it starts (the emulator, the 3D renderer, the network,
+     * achievements, the console's owner settings). A change shows up here as a different string.
+     */
+    fun bootFingerprint(): String = listOf(
+        jit, fastTiming, gpu3d, gpuScale, texFilter, antiAliasing, firmwareBoot, netMode, lanAddress,
+        cheevosEnabled, cheevosUser, cheevosToken, nickname, message, birthdayMonth, birthdayDay, favouriteColour, language,
+    ).joinToString("|")
+
+    // RetroAchievements: the token from sign-in stands for the password, which is never kept.
+    val cheevosUser get() = getString(CHEEVOS_USER, "")
+    val cheevosToken get() = getString(CHEEVOS_TOKEN, "")
+    val cheevosDisplayName get() = getString(CHEEVOS_DISPLAY_NAME, "").ifEmpty { cheevosUser }
+    val cheevosSignedIn get() = cheevosUser.isNotEmpty() && cheevosToken.isNotEmpty()
+    val cheevosEnabled get() = getBoolean(CHEEVOS_ENABLED, true)
+    val cheevosNotifications get() = getBoolean(CHEEVOS_NOTIFICATIONS, true)
+
+    fun cheevosSignIn(user: String, token: String, displayName: String) {
+        put(CHEEVOS_USER, user); put(CHEEVOS_TOKEN, token); put(CHEEVOS_DISPLAY_NAME, displayName)
+    }
+
+    fun cheevosSignOut() {
+        put(CHEEVOS_USER, null); put(CHEEVOS_TOKEN, null); put(CHEEVOS_DISPLAY_NAME, null)
+    }
+
     var libraryTipDismissed: Boolean
         get() = getBoolean(LIBRARY_TIP_DISMISSED, false)
         set(value) = put(LIBRARY_TIP_DISMISSED, value)
@@ -167,6 +192,11 @@ class Settings private constructor(private val file: File) {
         const val FACE_COLOURS = "face_colours"
         const val LIBRARY_COVERS = "library_covers"
         const val LIBRARY_TIP_DISMISSED = "library_tip_dismissed"
+        const val CHEEVOS_USER = "cheevos_user"
+        const val CHEEVOS_TOKEN = "cheevos_token"
+        const val CHEEVOS_DISPLAY_NAME = "cheevos_display_name"
+        const val CHEEVOS_ENABLED = "cheevos_enabled"
+        const val CHEEVOS_NOTIFICATIONS = "cheevos_notifications"
 
         @Volatile
         private var instance: Settings? = null

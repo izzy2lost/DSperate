@@ -3,8 +3,8 @@ package com.izzy2lost.ninds
 import android.view.Surface
 
 /**
- * The emulator core (libninds.so). Only the ":emu" process loads it; one game runs per
- * process, so these act on a single global session.
+ * The emulator core (libninds.so). The ":emu" process runs games with it, one per process, so
+ * these act on a single global session. Settings loads it only to sign in to RetroAchievements.
  */
 object NativeLib {
     init {
@@ -35,10 +35,19 @@ object NativeLib {
         birthdayDay: Int,
         colour: Int,
         language: Int,
+        cheevosUser: String,
+        cheevosToken: String,
     ): String
 
     /** How the game was started, when the player asked for something else (the DS menu); else empty. */
     external fun nativeBootNote(): String
+
+    /** RetroAchievements messages to show: kind, title, detail, points, badge URL, separated by \u001f. */
+    external fun nativeCheevosMessages(): Array<String>
+    /** Header row (state, user, game, game badge, unlocked, total, points, total points), then one row per achievement. */
+    external fun nativeCheevosList(): Array<String>
+    /** Blocking sign-in for Settings: {user, token, display name, score}, or {"", error}. */
+    external fun nativeCheevosLogin(user: String, password: String): Array<String>
 
     /** Local wireless: empty when not in a session, else who we are in it. */
     external fun nativeLanStatus(): String

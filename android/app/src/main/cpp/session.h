@@ -23,6 +23,7 @@
 #include <vector>
 
 namespace ds::net { class SlirpDriver; class LanMp; }
+namespace ds::cheevos { class Client; }
 
 namespace ninds {
 
@@ -43,6 +44,8 @@ struct SessionConfig {
   // LAN, else host one), host, guest (join only), join (lan_address).
   std::string net_mode = "off";
   std::string lan_address;
+  // RetroAchievements: signed in with these when both are set, else off.
+  std::string cheevos_user, cheevos_token;
   bool audio = true;
   int volume = 100;
   ds::bios::UserSettings user;
@@ -94,6 +97,13 @@ public:
   double fps() const { return fps_.load(std::memory_order_relaxed); }
   // Local wireless: "" when no session, else who we are in it ("Hosting" / "Joined <name>").
   std::string lan_status();
+
+  // RetroAchievements, for the UI thread. Fields are separated by \x1f.
+  // Messages to show: kind (unlock/info/problem), title, detail, points, badge URL.
+  std::vector<std::string> cheevos_messages();
+  // First row: state, user, game title, game badge, unlocked, total, points earned, points total.
+  // Then one per achievement: unlocked, unsupported, points, badge, locked badge, title, description, progress.
+  std::vector<std::string> cheevos_list();
   std::string game_code() const;
   // Something the player should know about how the game was started; empty if nothing.
   std::string boot_note();
@@ -120,6 +130,7 @@ private:
   bool mic_tried_ = false;        // emulator thread: opened (or failed to) once already
   std::unique_ptr<ds::net::SlirpDriver> slirp_;
   std::unique_ptr<ds::net::LanMp> lan_;
+  std::unique_ptr<ds::cheevos::Client> cheevos_;   // emulator thread, but for take_messages
   std::string lan_name_;
   std::string lan_status_;        // guarded by mu_
 

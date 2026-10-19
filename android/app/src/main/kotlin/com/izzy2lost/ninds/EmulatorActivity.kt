@@ -79,8 +79,13 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
     private var fastForwardHeld = false
     private var lidClosed = false
 
+    private var cheevoPopups: Achievements.Popups? = null
+    /** The boot-time settings this session started with (Settings.bootFingerprint). */
+    private var bootFingerprint = ""
+
     private val fpsTicker = object : Runnable {
         override fun run() {
+            if (booted) cheevoPopups?.poll()
             if (booted && settings.showFps) {
                 binding.fpsText.text = getString(R.string.fps_format, NativeLib.nativeGetFps())
             }
@@ -137,11 +142,13 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
             val error = runCatching {
                 val pfd = contentResolver.openFileDescriptor(uri, "r") ?: return@runCatching getString(R.string.error_open_rom)
                 romFd = pfd
+                bootFingerprint = settings.bootFingerprint()
                 NativeLib.nativeBoot(
                     pfd.fd, fileName, paths.savFile(stem).path, paths.cache.path, paths.bios.path,
                     settings.firmwareBoot, settings.jit, settings.fastTiming, settings.gpu3d, settings.gpuScale, settings.texFilter, settings.antiAliasing,
                     settings.netMode, settings.lanAddress, settings.audio, settings.volume, settings.nickname, settings.message,
                     settings.birthdayMonth, settings.birthdayDay, settings.favouriteColour, settings.language,
+                    if (settings.cheevosEnabled) settings.cheevosUser else "", if (settings.cheevosEnabled) settings.cheevosToken else "",
                 )
             }.getOrElse { it.message ?: getString(R.string.error_open_rom) }
             var stateMessage: String? = null
@@ -182,6 +189,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
             val status = NativeLib.nativeLanStatus()
             Toast.makeText(this, if (status.isEmpty()) getString(R.string.lan_none) else getString(R.string.lan_joined, status), Toast.LENGTH_LONG).show()
         }
+        cheevoPopups = Achievements.Popups(this, binding.root)
         handler.post(fpsTicker)
     }
 
@@ -194,6 +202,41 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         applyRuntimeSettings()
         goImmersive()
         updatePause()
+        offerRestartForSettings()
+    }
+
+    /** Back from Settings with a change only a fresh start applies: offer one, resuming in place. */
+    private fun offerRestartForSettings() {
+        if (!booted || currentDialog != null || bootFingerprint == settings.bootFingerprint()) return
+        present(
+            MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.restart_title)
+                .setMessage(R.string.restart_message)
+                .setPositiveButton(R.string.restart_now) { _, _ -> restartGame(resume = true) }
+                // Not now: keep playing; the change applies next time the game starts.
+                .setNegativeButton(R.string.restart_later) { _, _ -> bootFingerprint = settings.bootFingerprint() }
+                .setCancelable(false)
+                .create()
+        )
+    }
+
+    /**
+     * Starts this game over in a new process, so every setting is read again. With [resume] it
+     * picks up from a save state made just now. The library (another process) relaunches it once
+     * this process is gone: one game per process.
+     */
+    private fun restartGame(resume: Boolean) {
+        var slot = -1
+        if (resume && booted) {
+            val auto = SaveStateSlot(paths.stateDir(stem), SaveStateSlot.AUTO)
+            val frame = NativeLib.nativeGetFrame()
+            if (NativeLib.nativeSaveState(auto.state.path).isEmpty()) { auto.writeThumbnail(frame); slot = SaveStateSlot.AUTO }
+        }
+        val again = Intent(intent).putExtra(EXTRA_LOAD_SLOT, slot)
+        startActivity(Intent(this, LibraryActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            .putExtra(LibraryActivity.EXTRA_RELAUNCH, again))
+        exitNow(save = false)
     }
 
     override fun onPause() {
@@ -488,6 +531,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         content.findViewById<MaterialButton>(R.id.menuLid).text =
             getString(if (lidClosed) R.string.menu_open_lid else R.string.menu_close_lid)
         button(R.id.menuResume) {}
+        button(R.id.menuAchievements) { Achievements.showList(this) { present(it) } }
         button(R.id.menuSaveState) { showSlots(save = true) }
         button(R.id.menuLoadState) { showSlots(save = false) }
         button(R.id.menuFastForward) { setFastForward(!fastForward) }
@@ -522,7 +566,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
             MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.menu_reset)
                 .setMessage(R.string.reset_confirm)
-                .setPositiveButton(R.string.menu_reset) { _, _ -> NativeLib.nativeReset() }
+                .setPositiveButton(R.string.menu_reset) { _, _ ->
+                    // Settings changed since boot: a console reset would not pick them up.
+                    if (bootFingerprint != settings.bootFingerprint()) restartGame(resume = false) else NativeLib.nativeReset()
+                }
                 .setNegativeButton(android.R.string.cancel, null)
                 .create()
         )

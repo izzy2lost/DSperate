@@ -14,7 +14,7 @@
 
 #include "core/types.h"
 
-namespace ds { class NDS; }
+namespace ds { struct NDS; }
 
 namespace ds::cheevos {
 

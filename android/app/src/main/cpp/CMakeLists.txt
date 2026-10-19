@@ -7,13 +7,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # The DSperate tree is this repository's root. Only the libraries are wanted:
-# no tests, no desktop frontends, and RetroAchievements has no Android UI yet.
+# no tests and no desktop frontends. RetroAchievements' HTTP goes through Java (http_jni.cpp).
 get_filename_component(DSPERATE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
 set(DSPERATE_TESTS    OFF CACHE BOOL "" FORCE)
 set(DSPERATE_HEADLESS OFF CACHE BOOL "" FORCE)
 set(DSPERATE_SDL      OFF CACHE BOOL "" FORCE)
 set(DSPERATE_WAYLAND  OFF CACHE BOOL "" FORCE)
-set(DSPERATE_CHEEVOS  OFF CACHE BOOL "" FORCE)
+set(DSPERATE_CHEEVOS  ON  CACHE BOOL "" FORCE)
 set(DSPERATE_NET      ON  CACHE BOOL "" FORCE)
 set(DSPERATE_PGO      OFF CACHE STRING "" FORCE)
 add_subdirectory(${DSPERATE_ROOT} dsperate)
@@ -23,11 +23,12 @@ add_library(ninds SHARED
   session.cpp
   presenter_gl.cpp
   audio_out.cpp
-  mic_in.cpp)
+  mic_in.cpp
+  http_jni.cpp)
 target_include_directories(ninds PRIVATE ${DSPERATE_ROOT}/src)
 target_compile_options(ninds PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_link_libraries(ninds PRIVATE
-  dsperate_core dsperate_net
+  dsperate_core dsperate_net dsperate_cheevos
   android log EGL GLESv3 aaudio)
 # 16 KB page devices (Android 15+) must be able to load the library. The core's
 # fastmem views are laid in 4 KB pages, so session.cpp turns fastmem off there.

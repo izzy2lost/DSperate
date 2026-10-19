@@ -128,12 +128,34 @@ class LibraryActivity : AppCompatActivity() {
             val t = covers.titles()
             runOnUiThread { titles = t; render() }
         }
+        if (savedInstanceState == null) relaunch(intent)
         if (savedInstanceState == null && intent?.action == Intent.ACTION_VIEW) intent.data?.let(::addAndLaunch)
         else if (settings.romTreeUri.isNotEmpty() && games.isEmpty()) rescan()
     }
 
+    /** A game restarting to apply settings: started again once its old process has gone. */
+    private fun relaunch(intent: Intent?) {
+        @Suppress("DEPRECATION")
+        val again = intent?.getParcelableExtra<Intent>(EXTRA_RELAUNCH) ?: return
+        intent.removeExtra(EXTRA_RELAUNCH)
+        // Started too early it would land on the old, dying instance (singleTask): wait for its
+        // process to go, giving up the wait after a few seconds.
+        val am = getSystemService(android.app.ActivityManager::class.java)
+        val emu = "$packageName:emu"
+        var tries = 0
+        val check = object : Runnable {
+            override fun run() {
+                if (isFinishing) return
+                val alive = am.runningAppProcesses?.any { it.processName == emu } == true
+                if (alive && ++tries < 40) binding.root.postDelayed(this, 100) else startActivity(again)
+            }
+        }
+        binding.root.postDelayed(check, 150)
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        relaunch(intent)
         if (intent.action == Intent.ACTION_VIEW) intent.data?.let(::addAndLaunch)
     }
 
@@ -309,5 +331,9 @@ class LibraryActivity : AppCompatActivity() {
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+    }
+
+    companion object {
+        const val EXTRA_RELAUNCH = "com.izzy2lost.ninds.extra.RELAUNCH"
     }
 }

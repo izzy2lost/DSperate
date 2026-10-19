@@ -9,6 +9,9 @@
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
 #endif
+#include "cheevos/cheevos_client.h"
+#include "cheevos/cheevos_hash.h"
+#include "http_jni.h"
 #include "net/lan_mp.h"
 #include "net/slirp_driver.h"
 
@@ -197,6 +200,19 @@ std::string Session::boot(const SessionConfig& cfg) {
       lan_status_ = status;
     }
   }
+  if (!cfg.cheevos_user.empty() && !cfg.cheevos_token.empty() && nds.cart) {
+    // Signs in and loads the set in the background; the game does not wait.
+    cheevos_ = std::make_unique<ds::cheevos::Client>();
+    std::string why, hash;
+    if (!cheevos_->start(why, make_jni_backend())) {
+      LOGW("cheevos: %s", why.c_str());
+      cheevos_.reset();
+    } else {
+      cheevos_->sign_in_with_token(cfg.cheevos_user, cfg.cheevos_token);
+      if (ds::cheevos::rom_hash(nds.cart->source(), cfg.rom_name, hash, why, nds.dsi)) cheevos_->load_game(nds, hash);
+      else LOGW("cheevos: cannot hash the game: %s", why.c_str());
+    }
+  }
   audio_on_.store(cfg.audio);
   audio_.set_volume(cfg.volume);
   LOGI("booted %.4s (%s, %s BIOS, %s)", nds.cart ? nds.cart->header().game_code : "????", jit_on_ ? "recompiler" : "interpreter",
@@ -253,6 +269,45 @@ void Session::stop() {
   if (slirp_) { nds_->io.set_net_driver(nullptr); slirp_->stop(); slirp_.reset(); }
   // A guest says goodbye rather than going silent.
   if (lan_) { lan_->end_session(); nds_->io.wifi.set_transport(nullptr); lan_.reset(); }
+  cheevos_.reset();   // unlocks still queued are lost only if the server is unreachable now
+}
+
+std::vector<std::string> Session::cheevos_messages() {
+  std::vector<std::string> out;
+  if (!cheevos_) return out;
+  for (const ds::cheevos::Message& m : cheevos_->take_messages()) {
+    const char* kind = m.kind == ds::cheevos::Message::Kind::Unlock ? "unlock"
+                     : m.kind == ds::cheevos::Message::Kind::Problem ? "problem" : "info";
+    out.push_back(std::string(kind) + '\x1f' + m.text + '\x1f' + m.detail + '\x1f' + std::to_string(m.points) + '\x1f' + m.badge_url);
+  }
+  return out;
+}
+
+std::vector<std::string> Session::cheevos_list() {
+  std::vector<std::string> out;
+  post([&] {
+    if (!cheevos_) { out.push_back("off"); return; }
+    const char* state = "off";
+    switch (cheevos_->state()) {
+      case ds::cheevos::State::Off: state = "off"; break;
+      case ds::cheevos::State::SignedOut: state = "signed_out"; break;
+      case ds::cheevos::State::SigningIn: state = "signing_in"; break;
+      case ds::cheevos::State::SignedIn: state = "signed_in"; break;
+      case ds::cheevos::State::LoadingGame: state = "loading"; break;
+      case ds::cheevos::State::Playing: state = "playing"; break;
+      case ds::cheevos::State::NoSet: state = "no_set"; break;
+      case ds::cheevos::State::EmptySet: state = "empty_set"; break;
+    }
+    const ds::cheevos::Client::Summary s = cheevos_->summary();
+    const char sep = '\x1f';
+    out.push_back(std::string(state) + sep + cheevos_->username() + sep + cheevos_->game_title() + sep + cheevos_->game_badge_url() + sep +
+                  std::to_string(s.unlocked) + sep + std::to_string(s.total) + sep + std::to_string(s.points_earned) + sep + std::to_string(s.points));
+    for (const ds::cheevos::Client::Achievement& a : cheevos_->achievements()) {
+      out.push_back(std::string(a.unlocked ? "1" : "0") + sep + (a.unsupported ? "1" : "0") + sep + std::to_string(a.points) + sep +
+                    a.badge_url + sep + a.badge_locked_url + sep + a.title + sep + a.description + sep + a.progress);
+    }
+  }, true);
+  return out;
 }
 
 std::string Session::lan_status() {
@@ -328,7 +383,11 @@ std::string Session::save_state(const std::string& path) {
     ds::state::Writer w;
     std::string err;
     if (!nds_->save_state(w, err)) { result = "Could not save: " + err; return; }
-    if (!write_atomic(path, w.data().data(), w.data().size())) result = "Could not write the state file";
+    if (!write_atomic(path, w.data().data(), w.data().size())) { result = "Could not write the state file"; return; }
+    // Achievement progress (hit counts) beside the state, so a load cannot half-trigger one.
+    std::vector<uint8_t> progress;
+    if (cheevos_ && cheevos_->serialize_progress(progress)) write_atomic(path + ".rap", progress.data(), progress.size());
+    else std::remove((path + ".rap").c_str());
   }, true);
   return result;
 }
@@ -349,6 +408,10 @@ std::string Session::load_state(const std::string& path) {
       nds_->reset();
       nds_->setup_direct_boot();
     }
+    if (cheevos_) {
+      const std::vector<uint8_t> progress = slurp(path + ".rap");
+      if (progress.empty() || !cheevos_->deserialize_progress(progress.data(), progress.size())) cheevos_->reset();
+    }
     clock_reset_.store(true);
     audio_.clear();
   }, true);
@@ -363,6 +426,7 @@ void Session::reset() {
 #endif
     nds_->reset();
     if (!cfg_.firmware_boot || !nds_->can_boot_firmware()) nds_->setup_direct_boot();
+    if (cheevos_) cheevos_->reset();
     clock_reset_.store(true);
   }, true);
 }
@@ -460,6 +524,7 @@ void Session::run_one_frame() {
   if (slirp_) slirp_->process();
   if ((lan_ || guest_retry_armed_ || scanning_) && !ff) run_net_frame(nds);
   else nds.run_frame();
+  if (cheevos_) cheevos_->frame();
   ++frame_index_;
 
   int16_t buf[1024 * 2];
@@ -569,7 +634,10 @@ void Session::run() {
   for (;;) {
     {
       std::unique_lock<std::mutex> lock(mu_);
-      cv_.wait(lock, [&] { return quit_ || !paused_ || !jobs_.empty(); });
+      // Paused, RetroAchievements still wants a tick a second (pings, retries).
+      while (!cv_.wait_for(lock, std::chrono::seconds(1), [&] { return quit_ || !paused_ || !jobs_.empty(); })) {
+        if (cheevos_) { lock.unlock(); cheevos_->idle(); lock.lock(); }
+      }
       if (quit_) break;
     }
     drain_jobs();

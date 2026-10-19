@@ -21,7 +21,7 @@
 #include "cheevos/cheevos_memory.h"
 #include "core/types.h"
 
-namespace ds { class NDS; }
+namespace ds { struct NDS; }
 
 namespace ds::cheevos {
 
@@ -32,6 +32,7 @@ struct Message {
   std::string text;
   std::string detail;
   u32 points = 0;   // unlock value; 0 for non-unlocks and 0-point achievements
+  std::string badge_url;   // the unlocked badge image, for an unlock; empty otherwise
 };
 
 enum class State : u8 {
@@ -53,7 +54,8 @@ public:
   Client& operator=(const Client&) = delete;
 
   // False with a reason in `err` when there is no usable libcurl; not fatal.
-  bool start(std::string& err);
+  // `http` replaces libcurl (a frontend with its own networking, e.g. Android).
+  bool start(std::string& err, std::unique_ptr<Backend> http = nullptr);
   void shutdown();
 
   State state() const { return state_; }
@@ -76,6 +78,7 @@ public:
   void unload_game();
   std::string game_title() const;
   u32 game_id() const;
+  std::string game_badge_url() const;
   const std::string& game_hash() const { return hash_; }
 
   // Call once per emulated frame, right after NDS::run_frame().
@@ -93,6 +96,7 @@ public:
 
   struct Achievement {
     std::string title, description, progress;
+    std::string badge_url, badge_locked_url;   // badge images, earned and greyed
     u32 id = 0, points = 0;
     bool unlocked = false;      // the account holds it
     bool active = false;        // armed, can trigger now (both true in encore)
@@ -120,7 +124,8 @@ public:
 
 private:
   void worker_loop();
-  void post(Message::Kind kind, std::string text, std::string detail = {}, u32 points = 0);
+  void post(Message::Kind kind, std::string text, std::string detail = {}, u32 points = 0,
+            std::string badge_url = {});
   void drain_completions();
 
   struct Job {
@@ -174,6 +179,12 @@ void clear_credentials(const std::string& dir);
 bool read_token_file(const std::string& path, Credentials& out, std::string& err);
 
 bool read_cfw_credentials(const std::string& path, Credentials& out);
+
+// Signs in with a password outside any session (a settings screen), blocking
+// on `http`. On success `out` holds the username and the token to keep; the
+// password is not kept. `score` is the account's softcore points.
+bool login_with_password(Backend& http, const std::string& username, const std::string& password,
+                         Credentials& out, std::string& display_name, u32& score, std::string& err);
 bool import_cfw_credentials(Credentials& out, std::string& source);
 
 } // namespace ds::cheevos
