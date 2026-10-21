@@ -54,6 +54,8 @@ class SettingsActivity : AppCompatActivity() {
             BIOS9("bios9.bin", setOf(4096L), "import_bios9"),
             BIOS7("bios7.bin", setOf(16384L), "import_bios7"),
             FIRMWARE("firmware.bin", setOf(128L * 1024, 256L * 1024, 512L * 1024), "import_firmware"),
+            BIOS9I("bios9i.bin", setOf(65536L), "import_bios9i"),
+            BIOS7I("bios7i.bin", setOf(65536L), "import_bios7i"),
         }
 
         private val askMic = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->

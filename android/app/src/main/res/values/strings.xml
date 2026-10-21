@@ -201,10 +201,12 @@
     <string name="pref_system_note">Used when no firmware dump is installed, or the dump has no settings yet.</string>
 
     <string name="pref_cat_files">BIOS, firmware and files</string>
-    <string name="pref_bios_note">Optional. Without them NinDS uses a built-in BIOS and starts games directly. Dumps from your own DS give exact timing and the DS menu.</string>
+    <string name="pref_bios_note">Optional. Without them NinDS uses a built-in BIOS and starts games directly. Dumps from your own DS give exact timing and the DS menu. DSiWare games need both the DS and the DSi BIOS dumps.</string>
     <string name="pref_bios9">ARM9 BIOS (bios9.bin)</string>
     <string name="pref_bios7">ARM7 BIOS (bios7.bin)</string>
     <string name="pref_firmware">Firmware (firmware.bin)</string>
+    <string name="pref_bios9i">DSi ARM9 BIOS (bios9i.bin)</string>
+    <string name="pref_bios7i">DSi ARM7 BIOS (bios7i.bin)</string>
     <string name="pref_clear_bios">Remove BIOS and firmware</string>
     <string name="clear_bios_confirm">Remove the imported BIOS and firmware files? NinDS goes back to its built-in BIOS.</string>
     <string name="bios_present">Installed. Tap to replace.</string>

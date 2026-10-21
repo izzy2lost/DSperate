@@ -221,6 +221,28 @@ void test_entry_kinds() {
     CHECK(z.extract_cia(out, err, &chosen, &was_cia));
     CHECK(chosen == "title.nds" && !was_cia);
   }
+  {   // an update-server dump: content named by its ID, beside its TMD
+    Zip z;
+    z.add("titlePass.txt", std::vector<u8>(8, 'n'), 0);
+    z.add("tmd.1", std::vector<u8>(0x908, 't'), 8);
+    z.add("00000001", make_rom(kKnownCode, 0), 0);
+    z.finish();
+    std::vector<u8> out, tmd; std::string err, chosen;
+    CHECK(z.extract(out, err, &chosen));
+    CHECK(chosen == "00000001");
+    CHECK(cart::extract_tmd(z.buf.data(), z.buf.size(), tmd));
+    CHECK(tmd == std::vector<u8>(0x908, 't'));
+  }
+  {   // only an 8-digit hex name is one; "tmd.x" is not a TMD
+    Zip z;
+    z.add("0000001", make_rom(kKnownCode, 0), 0);
+    z.add("0000000g", make_rom(kKnownCode, 0), 0);
+    z.add("tmd.x", std::vector<u8>(0x208, 't'), 0);
+    z.finish();
+    std::vector<u8> out, tmd; std::string err;
+    CHECK(!z.extract(out, err));
+    CHECK(!cart::extract_tmd(z.buf.data(), z.buf.size(), tmd));
+  }
   {   // nothing usable names all four extensions, so the reason is actionable
     Zip z; z.add("cover.png", std::vector<u8>(100, 'p'), 0); z.finish();
     std::vector<u8> out; std::string err;

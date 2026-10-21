@@ -356,6 +356,14 @@
             app:title="@string/pref_firmware" />
         <Preference
             app:iconSpaceReserved="false"
+            app:key="import_bios9i"
+            app:title="@string/pref_bios9i" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="import_bios7i"
+            app:title="@string/pref_bios7i" />
+        <Preference
+            app:iconSpaceReserved="false"
             app:key="clear_bios"
             app:title="@string/pref_clear_bios" />
         <Preference

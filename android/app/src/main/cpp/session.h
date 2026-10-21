@@ -9,6 +9,7 @@
 #include "mic_in.h"
 #include "presenter_gl.h"
 
+#include "core/io/dsi_nand_persist.h"
 #include "core/nds.h"
 
 #include <atomic>
@@ -32,7 +33,7 @@ struct SessionConfig {
   std::string rom_name;         // display name; names the zip cache entry
   std::string save_path;        // battery save
   std::string cache_dir;        // zip extraction and the ROM link
-  std::string bios_dir;         // bios9.bin, bios7.bin, firmware.bin (each optional)
+  std::string bios_dir;         // bios9.bin, bios7.bin, firmware.bin (each optional); bios9i.bin, bios7i.bin for DSiWare
   bool firmware_boot = false;   // boot through the firmware menu when real dumps allow it
   bool jit = true;
   bool fast_timing = true;
@@ -114,6 +115,8 @@ private:
   void post(std::function<void()> job, bool wait);
   void drain_jobs();
   void write_save();
+  std::string boot_dsiware(ds::NDS& nds);
+  void export_dsi_saves();
   void run_net_frame(ds::NDS& nds);
   static bool game_launched(ds::NDS& nds);
   void set_lan_status(std::string s);
@@ -150,6 +153,11 @@ private:
   // Emulator thread only.
   uint32_t last_sram_writes_ = 0;
   int sram_quiet_frames_ = 0;
+  // DSiWare: its saves live on the made-up NAND and go out as files once its writes go quiet.
+  bool dsi_ = false;
+  ds::io::NandPersistPaths dsi_paths_;
+  uint64_t nand_writes_seen_ = 0, nand_exported_ = 0;
+  int nand_quiet_frames_ = 0;
   int skip_run_ = 0;              // frames skipped in a row (auto)
   bool late_ = false;             // the last frame missed its deadline
   uint64_t frame_index_ = 0;

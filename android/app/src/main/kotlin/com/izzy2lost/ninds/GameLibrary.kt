@@ -175,7 +175,7 @@ class GameLibrary(private val context: Context) {
             var e = zip.nextEntry
             while (e != null) {
                 val ext = e.name.substringAfterLast('.', "").lowercase(Locale.ROOT)
-                if (!e.isDirectory && ext in ROM_EXTENSIONS) {
+                if (!e.isDirectory && (ext in ROM_EXTENSIONS || isNusContent(e.name))) {
                     val header = readFully(zip, 0x200) ?: return null
                     val bannerAt = le32(header, 0x68)
                     // Inflating up to the banner is cheap for most games, whose banner sits
@@ -242,6 +242,10 @@ class GameLibrary(private val context: Context) {
     companion object {
         private val ROM_EXTENSIONS = setOf("nds", "dsi", "srl")
         private val EXTENSIONS = ROM_EXTENSIONS + "zip"
+        private val NUS_CONTENT = Regex("[0-9A-Fa-f]{8}")
+
+        /** An update-server dump names its content by ID alone ("00000001"), as zip.cpp accepts. */
+        private fun isNusContent(name: String) = NUS_CONTENT.matches(name.substringAfterLast('/').substringAfterLast('\\'))
 
         private fun le32(b: ByteArray, off: Int): Long =
             ByteBuffer.wrap(b, off, 4).order(ByteOrder.LITTLE_ENDIAN).int.toLong() and 0xFFFFFFFFL

@@ -53,6 +53,7 @@ bool read_dsiware(const std::string& path, std::vector<u8>& srl, std::string* er
   std::vector<u8> b(std::istreambuf_iterator<char>(f), {});
   std::string why;
 
+  std::vector<u8> zip_tmd;   // an update-server dump's own tmd entry
   if (cart::is_zip(b.data(), b.size())) {
     std::vector<u8> inner;
     std::string zerr, chosen;
@@ -60,6 +61,7 @@ bool read_dsiware(const std::string& path, std::vector<u8>& srl, std::string* er
       if (err) *err = path + ": " + zerr;
       return false;
     }
+    if (embedded_tmd) cart::extract_tmd(b.data(), b.size(), zip_tmd);
     b = std::move(inner);
   }
 
@@ -92,6 +94,9 @@ bool read_dsiware(const std::string& path, std::vector<u8>& srl, std::string* er
     srl = std::move(b);
   }
   if (!is_dsiware(srl, &why)) { if (err) *err = path + ": " + why; return false; }
+  // Its certificate chain follows; only a DSi-signed TMD is kept.
+  if (embedded_tmd && embedded_tmd->empty() && zip_tmd.size() >= kTmdSize && rd32be(&zip_tmd[0]) == 0x00010001)
+    embedded_tmd->assign(zip_tmd.begin(), zip_tmd.begin() + kTmdSize);
   return true;
 }
 

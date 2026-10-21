@@ -34,7 +34,8 @@ struct ZipEntry {
 
 // Picks the image entry out of `zip`. False with a reason in `err`.
 // Extensions taken to hold an image: .nds, .dsi, .srl (bare ROM/SRL), .cia
-// (SRL in a CIA container). A bare entry is always preferred over a .cia.
+// (SRL in a CIA container), and an update-server dump's content named by its
+// 8-digit hex ID alone ("00000001"). A bare entry is always preferred over a .cia.
 bool find_rom(const u8* zip, size_t size, ZipEntry& entry, std::string& err);
 
 // The first `n` uncompressed bytes of `entry` (fewer if shorter). CRC not
@@ -62,6 +63,10 @@ u32 crc32_update(u32 crc, const u8* data, size_t n);
 // `allow_cia`; io/dsi_title_install.h is the caller that unwraps one.
 bool extract_rom(const u8* zip, size_t size, std::vector<u8>& out, std::string& err,
                  std::string* chosen = nullptr, bool allow_cia = false, bool* was_cia = nullptr);
+
+// An update-server dump's "tmd" or "tmd.N" entry (the title's signed TMD,
+// often followed by its certificate chain). False if there is none.
+bool extract_tmd(const u8* zip, size_t size, std::vector<u8>& out);
 
 std::string cia_refusal(const std::string& name);
 

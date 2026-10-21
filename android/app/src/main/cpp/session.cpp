@@ -4,6 +4,7 @@
 
 #include "core/cheat/database.h"
 #include "core/cpu/timing_mode.h"
+#include "core/io/dsi_nand_persist.h"
 #include "core/host_cores.h"
 #include "core/state/state.h"
 #if DSPERATE_JIT
@@ -116,19 +117,25 @@ std::string Session::boot(const SessionConfig& cfg) {
   const std::string name = names + "/" + sanitize(cfg.rom_name.empty() ? std::string("game.nds") : cfg.rom_name);
   if (FILE* f = std::fopen(name.c_str(), "ab")) std::fclose(f);
   if (!nds.load_rom_fd(cfg.rom_fd, name)) return "Could not read the ROM. Is it a Nintendo DS game?";
-  // The DS menu needs the console's own BIOS and a DS or DS Lite firmware: a
-  // DSi or 3DS dump (128 KB, console type 0x57) carries no DS boot code and
-  // would leave the screens black. Anything less starts the game directly.
-  bool firmware_boot = cfg.firmware_boot;
-  if (firmware_boot && !nds.can_boot_firmware()) {
-    firmware_boot = false;
-    if (boot_note_.empty()) boot_note_ = "The DS menu needs your own BIOS and firmware dumps; the game was started directly.";
-  } else if (firmware_boot && (nds.firmware.size() < 0x40000 || nds.firmware[0x1D] == 0x57)) {
-    firmware_boot = false;
-    boot_note_ = "This firmware is from a DSi or 3DS and cannot show the DS menu; the game was started directly.";
+  bool firmware_boot = false;
+  if (nds.cart && nds.cart->dsi_capable() && nds.cart->twl().title_id_hi == 0x00030004) {
+    const std::string why = boot_dsiware(nds);
+    if (!why.empty()) return why;
+  } else {
+    // The DS menu needs the console's own BIOS and a DS or DS Lite firmware: a
+    // DSi or 3DS dump (128 KB, console type 0x57) carries no DS boot code and
+    // would leave the screens black. Anything less starts the game directly.
+    firmware_boot = cfg.firmware_boot;
+    if (firmware_boot && !nds.can_boot_firmware()) {
+      firmware_boot = false;
+      if (boot_note_.empty()) boot_note_ = "The DS menu needs your own BIOS and firmware dumps; the game was started directly.";
+    } else if (firmware_boot && (nds.firmware.size() < 0x40000 || nds.firmware[0x1D] == 0x57)) {
+      firmware_boot = false;
+      boot_note_ = "This firmware is from a DSi or 3DS and cannot show the DS menu; the game was started directly.";
+    }
+    if (!boot_note_.empty()) LOGW("%s", boot_note_.c_str());
+    if (!firmware_boot) nds.setup_direct_boot();
   }
-  if (!boot_note_.empty()) LOGW("%s", boot_note_.c_str());
-  if (!firmware_boot) nds.setup_direct_boot();
 
   if (nds.cart && !cfg.save_path.empty()) {
     std::vector<uint8_t> data = slurp(cfg.save_path);
@@ -215,9 +222,49 @@ std::string Session::boot(const SessionConfig& cfg) {
   }
   audio_on_.store(cfg.audio);
   audio_.set_volume(cfg.volume);
-  LOGI("booted %.4s (%s, %s BIOS, %s)", nds.cart ? nds.cart->header().game_code : "????", jit_on_ ? "recompiler" : "interpreter",
-       nds.bios_native ? "native" : "built-in", ds::g_fast_timing ? "fast timing" : "exact timing");
+  LOGI("booted %.4s (%s, %s, %s BIOS, %s)", nds.cart ? nds.cart->header().game_code : "????", dsi_ ? "DSi" : "DS",
+       jit_on_ ? "recompiler" : "interpreter", nds.bios_native ? "native" : "built-in", ds::g_fast_timing ? "fast timing" : "exact timing");
   return {};
+}
+
+// DSiWare runs on a DSi, started the way the DSi Launcher hands a title over,
+// on a NAND made up in memory (as the desktop does without a NAND dump). The
+// DS BIOS pair is needed as well: the built-in BIOS cannot boot a DSi.
+std::string Session::boot_dsiware(ds::NDS& nds) {
+  const std::string b9i = cfg_.bios_dir + "/bios9i.bin", b7i = cfg_.bios_dir + "/bios7i.bin";
+  if (!file_exists(b9i) || !file_exists(b7i) || !nds.bios_native)
+    return "This is a DSiWare game, which runs on a DSi. Import your DS BIOS (bios9.bin, bios7.bin) and DSi BIOS "
+           "(bios9i.bin, bios7i.bin) under Settings > BIOS, firmware and files.";
+  std::string err;
+  if (!nds.load_dsi_bios(b9i, b7i, &err)) return "DSi BIOS: " + err.substr(err.rfind('/') + 1);
+  nds.set_dsi(true);
+  nds.dsi_hle_launch = true;
+  std::vector<std::string> made;
+  if (!nds.prepare_dsi_hle(cfg_.user, &err, &made)) return "DSi: " + err;
+  for (const std::string& m : made) LOGI("dsi: %s", m.c_str());
+  nds.reset();
+  nds.io.start_rtc_clock();
+  nds.setup_direct_boot();
+  // Title saves (<GAMECODE>.pub/.prv/.bnr) beside the DS games' saves.
+  const size_t slash = cfg_.save_path.rfind('/');
+  dsi_paths_.saves_dir = slash == std::string::npos ? cfg_.cache_dir : cfg_.save_path.substr(0, slash);
+  dsi_paths_.photos_dir = dsi_paths_.saves_dir + "/dsi-photos";
+  const ds::io::NandPersistReport r = ds::io::nand_import(nds.dsi_nand, nds.bus.bios7i.get(), dsi_paths_);
+  nds.dsi_nand.mark_baseline();
+  if (r.saves || r.photos) LOGI("dsi: restored %d title saves, %d photos", r.saves, r.photos);
+  for (const std::string& n : r.notes) LOGW("dsi: %s", n.c_str());
+  nand_writes_seen_ = nand_exported_ = nds.dsi_nand.writes;
+  fw_override_.clear();   // the DSi settings are made up each start; nothing goes back to the DS firmware
+  dsi_ = true;
+  return {};
+}
+
+void Session::export_dsi_saves() {
+  if (!dsi_ || nds_->dsi_nand.writes == nand_exported_) return;
+  nand_exported_ = nds_->dsi_nand.writes;
+  const ds::io::NandPersistReport r = ds::io::nand_export(nds_->dsi_nand, nds_->bus.bios7i.get(), dsi_paths_);
+  if (r.saves || r.photos) LOGI("dsi: saved %d title saves, %d photos", r.saves, r.photos);
+  for (const std::string& n : r.notes) LOGW("dsi: %s", n.c_str());
 }
 
 // The DS menu has launched the game once the ARM9 runs inside the game's own
@@ -262,6 +309,7 @@ void Session::stop() {
   presenter_.stop();
   if (!nds_) return;
   if (nds_->cart && nds_->cart->sram_dirty()) write_save();
+  export_dsi_saves();
   if (!fw_override_.empty() && nds_->firmware_override_dirty()) {
     std::string err;
     if (!nds_->save_firmware_override(fw_override_, err)) LOGW("firmware override: %s", err.c_str());
@@ -373,6 +421,7 @@ bool Session::flush_save() {
   bool wrote = false;
   post([&] {
     if (nds_ && nds_->cart && nds_->cart->sram_dirty()) { write_save(); wrote = true; }
+    if (nds_ && dsi_ && nds_->dsi_nand.writes != nand_exported_) { export_dsi_saves(); wrote = true; }
   }, true);
   return wrote;
 }
@@ -421,11 +470,12 @@ std::string Session::load_state(const std::string& path) {
 void Session::reset() {
   post([this] {
     if (nds_->cart && nds_->cart->sram_dirty()) write_save();
+    export_dsi_saves();
 #if DSPERATE_JIT
     if (jit_on_) ds::jit::flush_all();
 #endif
     nds_->reset();
-    if (!cfg_.firmware_boot || !nds_->can_boot_firmware()) nds_->setup_direct_boot();
+    if (dsi_ || !cfg_.firmware_boot || !nds_->can_boot_firmware()) nds_->setup_direct_boot();
     if (cheevos_) cheevos_->reset();
     clock_reset_.store(true);
   }, true);
@@ -565,6 +615,23 @@ void Session::run_one_frame() {
     const uint32_t writes = nds.cart->sram_writes();
     if (writes != last_sram_writes_) { last_sram_writes_ = writes; sram_quiet_frames_ = 0; }
     else if (nds.cart->sram_dirty() && ++sram_quiet_frames_ >= SRAM_QUIET_FRAMES) { write_save(); sram_quiet_frames_ = 0; }
+  }
+  if (dsi_) {
+    const uint64_t writes = nds.dsi_nand.writes;
+    if (writes != nand_writes_seen_) { nand_writes_seen_ = writes; nand_quiet_frames_ = 0; }
+    else if (writes != nand_exported_ && ++nand_quiet_frames_ >= SRAM_QUIET_FRAMES * 2) { export_dsi_saves(); nand_quiet_frames_ = 0; }
+    // The title asked to go back to the DSi Menu. There is none here, so it starts again.
+    if (nds.exit_requested) {
+      LOGI("dsi: the title left; starting it again");
+      export_dsi_saves();
+#if DSPERATE_JIT
+      if (jit_on_) ds::jit::flush_all();
+#endif
+      nds.reset();
+      nds.setup_direct_boot();
+      if (cheevos_) cheevos_->reset();
+      clock_reset_.store(true);
+    }
   }
 #if DSPERATE_JIT
   if (strict_for_menu_ && game_launched(nds)) {

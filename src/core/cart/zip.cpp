@@ -28,7 +28,34 @@ u32 rd32(const u8* p) { return static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) 
 
 enum class Kind { Other, Rom, Cia };   // case-insensitive extension match
 
+// A Nintendo update-server dump names its contents by ID alone ("00000001"),
+// beside "tmd" or "tmd.N". Only the base name counts; a folder may precede it.
+bool is_nus_content(const char* name, size_t len) {
+  size_t base = len;
+  while (base > 0 && name[base - 1] != '/' && name[base - 1] != '\\') --base;
+  if (len - base != 8) return false;
+  for (size_t i = base; i < len; ++i) {
+    const char c = name[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+  }
+  return true;
+}
+
+bool is_tmd_name(const char* name, size_t len) {
+  size_t base = len;
+  while (base > 0 && name[base - 1] != '/' && name[base - 1] != '\\') --base;
+  const char* b = name + base;
+  const size_t n = len - base;
+  auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + 32) : c; };
+  if (n < 3 || lower(b[0]) != 't' || lower(b[1]) != 'm' || lower(b[2]) != 'd') return false;
+  if (n == 3) return true;
+  if (b[3] != '.' || n == 4) return false;
+  for (size_t i = 4; i < n; ++i) if (b[i] < '0' || b[i] > '9') return false;
+  return true;
+}
+
 Kind entry_kind(const char* name, size_t len) {
+  if (is_nus_content(name, len)) return Kind::Rom;
   if (len < 4) return Kind::Other;
   const char* e = name + len - 4;
   if (e[0] != '.') return Kind::Other;
@@ -265,6 +292,48 @@ size_t peek_entry(const u8* zip, size_t size, const ZipEntry& entry, u8* out, si
   size_t got = 0;
   return inflate_raw(src, static_cast<size_t>(entry.csize), want,
                      [&](const u8* p, size_t m) { std::memcpy(out + got, p, m); got += m; return true; });
+}
+
+bool extract_tmd(const u8* zip, size_t size, std::vector<u8>& out) {
+  out.clear();
+  if (size < 22) return false;
+  size_t eocd = 0;
+  bool found = false;
+  const size_t limit = size < 22 + 0xFFFF ? size : 22 + 0xFFFF;
+  for (size_t back = 22; back <= limit; ++back) {
+    if (rd32(zip + size - back) == SIG_EOCD) { eocd = size - back; found = true; break; }
+  }
+  if (!found) return false;
+  const u32 count = rd16(zip + eocd + 10);
+  const u32 cd_size = rd32(zip + eocd + 12);
+  const u32 cd_off = rd32(zip + eocd + 16);
+  if (cd_off > size || cd_size > size - cd_off) return false;
+  size_t p = cd_off;
+  const size_t cd_end = cd_off + cd_size;
+  for (u32 i = 0; i < count && p + 46 <= cd_end; ++i) {
+    const u8* h = zip + p;
+    if (rd32(h) != SIG_CENTRAL) return false;
+    const u16 flags = rd16(h + 8), method = rd16(h + 10);
+    const u16 name_len = rd16(h + 28), extra_len = rd16(h + 30), cmt_len = rd16(h + 32);
+    const size_t name_off = p + 46;
+    p = name_off + name_len + extra_len + cmt_len;
+    if (p > cd_end) return false;
+    if (!is_tmd_name(reinterpret_cast<const char*>(zip + name_off), name_len)) continue;
+    Entry e;
+    e.method = method; e.crc = rd32(h + 16); e.csize = rd32(h + 20); e.usize = rd32(h + 24);
+    e.local_off = rd32(h + 42);
+    // A TMD with its certificate chain is a few KB; anything far bigger is not one.
+    if ((flags & 1) || (method != METHOD_STORE && method != METHOD_DEFLATE) || e.usize > (1u << 20)) continue;
+    size_t off = 0;
+    if (!data_offset(zip, size, e, off)) continue;
+    out.resize(static_cast<size_t>(e.usize));
+    if (!read_entry(zip, e, off, out.data(), out.size()) || crc32_update(0, out.data(), out.size()) != e.crc) {
+      out.clear();
+      continue;
+    }
+    return true;
+  }
+  return false;
 }
 
 std::string cia_refusal(const std::string& name) {
