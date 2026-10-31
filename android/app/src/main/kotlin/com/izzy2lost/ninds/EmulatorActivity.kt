@@ -25,6 +25,8 @@ import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.View
+import android.widget.GridLayout
+import androidx.core.view.updateLayoutParams
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.EditText
@@ -533,6 +535,13 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         if (!booted || currentDialog != null || isFinishing) return
         val content = LayoutInflater.from(this).inflate(R.layout.dialog_game_menu, null, false)
         content.findViewById<TextView>(R.id.menuTitle).text = gameTitle
+        // Three columns in landscape keep the whole menu on screen; in portrait two, with the
+        // odd one out (Settings) across both.
+        val grid = content.findViewById<GridLayout>(R.id.menuGrid)
+        if (!isPortrait()) grid.columnCount = 3
+        else content.findViewById<View>(R.id.menuSettings).updateLayoutParams<GridLayout.LayoutParams> {
+            columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 2, 1f)
+        }
         val dialog = MaterialAlertDialogBuilder(this).setView(content).create()
         fun button(id: Int, then: () -> Unit) = content.findViewById<MaterialButton>(id).setOnClickListener {
             // Open what comes next before closing the menu, so the game stays paused between them.
