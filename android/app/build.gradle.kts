@@ -30,9 +30,9 @@ android {
         versionName = "1.0.1"
 
         ndk {
-            // The recompiler and the NEON kernels are AArch64 code; every device worth
-            // emulating a DS on is arm64.
-            abiFilters += listOf("arm64-v8a")
+            // arm64 first; armeabi-v7a runs the core's ARMv7 recompiler and NEON kernels on
+            // 32-bit devices.
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
 
         externalNativeBuild {

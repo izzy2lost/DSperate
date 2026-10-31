@@ -25,7 +25,7 @@ option(DSPERATE_NET      "Build the Wi-Fi transports (local wireless over the LA
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
   set(DSPERATE_HOST_AARCH64 ON)
   set(DSPERATE_HOST_ARM32 OFF)
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|armv7|armv7l|armv7a|armhf)$")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|armv7|armv7l|armv7a|armv7-a|armhf)$")
   set(DSPERATE_HOST_AARCH64 OFF)
   set(DSPERATE_HOST_ARM32 ON)
 else()
@@ -39,15 +39,21 @@ if(NOT DSPERATE_HOST_AARCH64 AND NOT DSPERATE_HOST_ARM32 AND DSPERATE_JIT)
 endif()
 
 # ARMv7 NEON isn't IEEE-clean by default; pin VFPv4 + hard-float so results
-# can't silently differ from AArch64.
+# can't silently differ from AArch64. Android's armeabi-v7a ABI is softfp
+# (floats cross calls in core registers); the VFP/NEON code is the same.
+if(ANDROID)
+  set(_ds_arm32_float_abi softfp)
+else()
+  set(_ds_arm32_float_abi hard)
+endif()
 if(DSPERATE_HOST_ARM32 AND DSPERATE_NEON)
   include(CheckCXXSourceCompiles)
-  set(CMAKE_REQUIRED_FLAGS "-mfpu=neon-vfpv4 -mfloat-abi=hard")
+  set(CMAKE_REQUIRED_FLAGS "-mfpu=neon-vfpv4 -mfloat-abi=${_ds_arm32_float_abi}")
   check_cxx_source_compiles("#include <arm_neon.h>
     int main() { return vgetq_lane_u8(vdupq_n_u8(0), 0); }" DSPERATE_ARM32_NEON_OK)
   unset(CMAKE_REQUIRED_FLAGS)
   if(DSPERATE_ARM32_NEON_OK)
-    add_compile_options(-mfpu=neon-vfpv4 -mfloat-abi=hard)
+    add_compile_options(-mfpu=neon-vfpv4 -mfloat-abi=${_ds_arm32_float_abi})
     message(STATUS "DSperate: ARMv7 host; NEON kernels built from the A32 subset")
   else()
     message(STATUS "DSperate: ARMv7 host without usable NEON; ref kernels only")

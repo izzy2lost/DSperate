@@ -352,7 +352,8 @@ namespace {
 // bit 4, palette from ctl bits 0-3 (pal_shift 4/8/none), index 0 transparent.
 template <int pal_shift>
 [[gnu::always_inline]] inline uint8x16_t text_pair(uint8x16_t idx, const u8* ctl, u16* v) {
-  const uint8x8_t c2 = vreinterpret_u8_u16(vld1_dup_u16(reinterpret_cast<const u16*>(ctl)));   // [c0 c1 c0 c1 ..]
+  u16 c01; std::memcpy(&c01, ctl, 2);   // ctl need not be 2-byte aligned (ARMv7 traps a vld1 that assumes it)
+  const uint8x8_t c2 = vreinterpret_u8_u16(vdup_n_u16(c01));   // [c0 c1 c0 c1 ..]
   const uint8x16_t ctl16 = vcombine_u8(vdup_lane_u8(c2, 0), vdup_lane_u8(c2, 1));
   idx = vbslq_u8(vtstq_u8(ctl16, vdupq_n_u8(0x10)), vrev64q_u8(idx), idx);
   const int8x16_t nz = vreinterpretq_s8_u8(vtstq_u8(idx, idx));
@@ -1414,7 +1415,8 @@ static u32 depth_candidates_m(const s32* z, const u32* dstz, const u32* dstattr,
     } else { v = vandq_u32(ok, one); (void)two; (void)under_off; }
     const uint16x4_t v16 = vmovn_u32(v);
     const uint8x8_t v8 = vmovn_u16(vcombine_u16(v16, v16));
-    vst1_lane_u32(reinterpret_cast<u32*>(pass + i), vreinterpret_u32_u8(v8), 0);
+    // memcpy, not vst1_lane_u32 on a u32*: ARMv7 takes that as 4-byte aligned, and pass + i need not be.
+    const u32 w = vget_lane_u32(vreinterpret_u32_u8(v8), 0); std::memcpy(pass + i, &w, 4);
     any = vorrq_u32(any, v);
   }
   if (compat::maxv_u32(any) == 0) return 0;
@@ -1459,7 +1461,8 @@ static u32 depth_candidates_shadow_m(const s32* z, const u32* dstz, const u32* d
     }
     const uint16x4_t v16 = vmovn_u32(v);
     const uint8x8_t v8 = vmovn_u16(vcombine_u16(v16, v16));
-    vst1_lane_u32(reinterpret_cast<u32*>(pass + i), vreinterpret_u32_u8(v8), 0);
+    // memcpy, not vst1_lane_u32 on a u32*: ARMv7 takes that as 4-byte aligned, and pass + i need not be.
+    const u32 w = vget_lane_u32(vreinterpret_u32_u8(v8), 0); std::memcpy(pass + i, &w, 4);
     any = vorrq_u32(any, v);
   }
   if (compat::maxv_u32(any) == 0) return 0;

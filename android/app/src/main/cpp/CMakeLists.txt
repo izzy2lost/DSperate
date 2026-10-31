@@ -33,3 +33,9 @@ target_link_libraries(ninds PRIVATE
 # 16 KB page devices (Android 15+) must be able to load the library. The core's
 # fastmem views are laid in 4 KB pages, so session.cpp turns fastmem off there.
 target_link_options(ninds PRIVATE "-Wl,-z,max-page-size=16384")
+# armeabi-v7a below API 29 has no ELF TLS: the compiler emits emulated TLS for
+# the core's thread_locals, and the LTO code generator at link time must too,
+# or it asks for __tls_get_addr, which bionic does not export.
+if(ANDROID_ABI STREQUAL "armeabi-v7a")
+  target_link_options(ninds PRIVATE "-Wl,-plugin-opt=-emulated-tls")
+endif()

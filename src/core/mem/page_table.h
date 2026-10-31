@@ -8,6 +8,15 @@
 #include <cstdlib>
 #include "core/types.h"
 #include "core/profile.h"
+// 32-bit Android always defines PAGE_SIZE (and PAGE_MASK) as macros for the
+// host's 4 KB page, which would replace the guest's below. Its header is
+// include-guarded, so pulling it in here and dropping the macros keeps any
+// later include from bringing them back.
+#if defined(__ANDROID__) && defined(__arm__)
+#include <bits/page_size.h>
+#undef PAGE_SIZE
+#undef PAGE_MASK
+#endif
 
 namespace ds::mem {
 
