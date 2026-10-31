@@ -1,6 +1,7 @@
 package com.izzy2lost.ninds
 
 import android.content.Context
+import android.content.pm.PackageManager
 import androidx.preference.PreferenceDataStore
 import java.io.File
 import java.util.Properties
@@ -205,5 +206,12 @@ class Settings private constructor(private val file: File) {
             instance ?: synchronized(this) {
                 instance ?: Settings(File(context.applicationContext.filesDir, "settings.properties")).also { instance = it }
             }
+
+        /**
+         * Whether the device has the Vulkan 1.1 the GPU 3D renderer needs. Without it, GPU 3D,
+         * 3D resolution and smooth textures are unavailable: 3D is drawn on the CPU at 1x.
+         */
+        fun hasVulkan(context: Context): Boolean =
+            context.packageManager.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION, 0x401000)
     }
 }

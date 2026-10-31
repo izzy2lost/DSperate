@@ -143,9 +143,12 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
                 val pfd = contentResolver.openFileDescriptor(uri, "r") ?: return@runCatching getString(R.string.error_open_rom)
                 romFd = pfd
                 bootFingerprint = settings.bootFingerprint()
+                // The GPU options stay off without Vulkan, even if set before (or restored from a backup).
+                val vulkan = Settings.hasVulkan(this)
                 NativeLib.nativeBoot(
                     pfd.fd, fileName, paths.savFile(stem).path, paths.cache.path, paths.bios.path,
-                    settings.firmwareBoot, settings.jit, settings.fastTiming, settings.gpu3d, settings.gpuScale, settings.texFilter, settings.antiAliasing,
+                    settings.firmwareBoot, settings.jit, settings.fastTiming,
+                    vulkan && settings.gpu3d, if (vulkan) settings.gpuScale else 1, vulkan && settings.texFilter, settings.antiAliasing,
                     settings.netMode, settings.lanAddress, settings.audio, settings.volume, settings.nickname, settings.message,
                     settings.birthdayMonth, settings.birthdayDay, settings.favouriteColour, settings.language,
                     if (settings.cheevosEnabled) settings.cheevosUser else "", if (settings.cheevosEnabled) settings.cheevosToken else "",

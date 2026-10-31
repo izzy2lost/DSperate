@@ -141,6 +141,7 @@
     <string name="pref_gpu_scale_note">Above native uses GPU 3D. Each step costs GPU time: 6× and 8× need a high-end GPU.</string>
     <string name="pref_tex_filter">Smooth textures</string>
     <string name="pref_tex_filter_summary">Bilinear filtering for 3D textures. Uses GPU 3D.</string>
+    <string name="pref_gpu_needs_vulkan">Needs Vulkan, which this device doesn\'t have. 3D is drawn on the CPU at native resolution.</string>
     <string name="pref_aa">3D anti-aliasing</string>
     <string name="pref_aa_summary">The DS\'s own edge smoothing, as games request it</string>
     <string name="pref_frameskip">Frame skip</string>

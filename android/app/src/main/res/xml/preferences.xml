@@ -32,6 +32,7 @@
             app:useSimpleSummaryProvider="true" />
         <Preference
             app:iconSpaceReserved="false"
+            app:key="gpu_scale_note"
             app:selectable="false"
             app:summary="@string/pref_gpu_scale_note" />
         <SwitchPreferenceCompat

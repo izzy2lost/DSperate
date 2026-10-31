@@ -182,6 +182,10 @@ class SettingsActivity : AppCompatActivity() {
             for ((key, action) in links) {
                 findPreference<Preference>(key)?.setOnPreferenceClickListener { action(); true }
             }
+            if (!Settings.hasVulkan(requireContext())) {
+                for (key in listOf(Settings.GPU3D, Settings.GPU_SCALE, Settings.TEX_FILTER)) findPreference<Preference>(key)?.isEnabled = false
+                findPreference<Preference>("gpu_scale_note")?.summary = getString(R.string.pref_gpu_needs_vulkan)
+            }
             findPreference<Preference>("about")?.summary = getString(R.string.about_summary, BuildConfig.VERSION_NAME)
             refreshSummaries()
         }
