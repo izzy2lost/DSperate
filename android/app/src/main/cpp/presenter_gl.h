@@ -5,7 +5,9 @@
 // emulator paces itself and hands over finished frames; the presenter shows
 // the newest one at the display's rate (so fast-forward never blocks on
 // eglSwapBuffers). Placement is decided by the Kotlin side, which also owns
-// the touch mapping, and arrives here as two rectangles in surface pixels.
+// the touch mapping, and arrives here as two rectangles in surface pixels per
+// display: the device's own (MAIN) and, on a dual-screen device or with an
+// external monitor attached, a second one (SECOND), each with its own window.
 #pragma once
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
@@ -39,17 +41,18 @@ struct HiresFrame {
 class Presenter {
 public:
   enum Filter { NEAREST = 0, LINEAR = 1, SHARP = 2, LCD = 3, XBRZ = 4 };
+  enum Display { MAIN = 0, SECOND = 1, DISPLAYS = 2 };
 
   Presenter();
   ~Presenter();
 
   void start();
   void stop();
-  // Adopts `window` (the caller's reference passes to the presenter), or
-  // drops the current one for null. Returns once the render thread has done
-  // it, so a surfaceDestroyed callback can return safely.
-  void set_window(ANativeWindow* window);
-  void set_layout(const ScreenRect& top, const ScreenRect& bottom);
+  // Adopts `window` for `display` (the caller's reference passes to the
+  // presenter), or drops that display's for null. Returns once the render
+  // thread has done it, so a surfaceDestroyed callback can return safely.
+  void set_window(int display, ANativeWindow* window);
+  void set_layout(int display, const ScreenRect& top, const ScreenRect& bottom);
   void set_filter(int filter);
   // Emulator thread: both screens, 256x192 0xAARRGGBB each. With `hires`
   // (its contents are swapped with the presenter's previous ones), engine
@@ -60,8 +63,10 @@ public:
 
 private:
   void run();
-  bool make_current(ANativeWindow* w);
-  void release_surface();
+  bool make_surface(int display);
+  void release_surface(int display);
+  bool init_programs();
+  void draw_display(int display, const ScreenRect* rect, int filter, bool xbrz, int hi_screen);
   void release_all();
   bool init_gl();
   bool init_xbrz();
@@ -78,10 +83,10 @@ private:
   bool quit_ = false;
 
   // Guarded by mu_.
-  ANativeWindow* pending_window_ = nullptr;
-  bool window_change_ = false;
+  ANativeWindow* pending_window_[DISPLAYS] = {};
+  bool window_change_[DISPLAYS] = {};
   uint64_t window_gen_ = 0, window_done_ = 0;
-  ScreenRect rect_[2];
+  ScreenRect rect_[DISPLAYS][2];       // per display: top, bottom
   int filter_ = NEAREST;
   bool dirty_ = false;                 // something to draw (frame, layout, filter)
   std::vector<uint32_t> back_;         // newest submitted frame
@@ -89,10 +94,11 @@ private:
   HiresFrame hi_back_;                 // the high-res data that goes with back_
 
   // Render thread only.
-  ANativeWindow* window_ = nullptr;
+  // One context shared by both displays' surfaces, so every texture serves both.
+  ANativeWindow* window_[DISPLAYS] = {};
   EGLDisplay display_ = EGL_NO_DISPLAY;
   EGLContext context_ = EGL_NO_CONTEXT;
-  EGLSurface surface_ = EGL_NO_SURFACE;
+  EGLSurface surface_[DISPLAYS] = {EGL_NO_SURFACE, EGL_NO_SURFACE};
   EGLConfig config_ = nullptr;
   GLuint program_ = 0, tex_[2] = {0, 0};
   GLint u_tex_ = -1, u_mode_ = -1, u_out_ = -1;

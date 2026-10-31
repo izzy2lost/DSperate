@@ -166,18 +166,24 @@ JNI_FN(void, nativeShutdown)(JNIEnv*, jobject) {
   if (g_session) { g_session->stop(); g_session.reset(); }
 }
 
-JNI_FN(void, nativeSetSurface)(JNIEnv* env, jobject, jobject surface) {
+// display: 0 the device's own, 1 a second display (dual-screen device or external monitor).
+JNI_FN(void, nativeSetSurface)(JNIEnv* env, jobject, jint display, jobject surface) {
   auto* s = session();
-  if (!s) return;
-  s->presenter().set_window(surface ? ANativeWindow_fromSurface(env, surface) : nullptr);
+  if (!s || display < 0 || display >= ninds::Presenter::DISPLAYS) return;
+  s->presenter().set_window(display, surface ? ANativeWindow_fromSurface(env, surface) : nullptr);
 }
 
-JNI_FN(void, nativeSetLayout)(JNIEnv*, jobject, jint tx, jint ty, jint tw, jint th, jboolean tshown,
+// The screens shown on each display; a screen shown on neither is not drawn at all.
+static bool g_shown[ninds::Presenter::DISPLAYS][2] = {{true, true}, {false, false}};
+
+JNI_FN(void, nativeSetLayout)(JNIEnv*, jobject, jint display, jint tx, jint ty, jint tw, jint th, jboolean tshown,
                               jint bx, jint by, jint bw, jint bh, jboolean bshown) {
   auto* s = session();
-  if (!s) return;
-  s->presenter().set_layout({tx, ty, tw, th, tshown != 0}, {bx, by, bw, bh, bshown != 0});
-  s->set_screens_shown(tshown, bshown);
+  if (!s || display < 0 || display >= ninds::Presenter::DISPLAYS) return;
+  s->presenter().set_layout(display, {tx, ty, tw, th, tshown != 0}, {bx, by, bw, bh, bshown != 0});
+  g_shown[display][0] = tshown;
+  g_shown[display][1] = bshown;
+  s->set_screens_shown(g_shown[0][0] || g_shown[1][0], g_shown[0][1] || g_shown[1][1]);
 }
 
 JNI_FN(void, nativeSetFilter)(JNIEnv*, jobject, jint filter) { if (auto* s = session()) s->presenter().set_filter(filter); }

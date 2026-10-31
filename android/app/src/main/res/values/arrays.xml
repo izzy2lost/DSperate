@@ -266,4 +266,16 @@
         <item>blow</item>
         <item>phone</item>
     </string-array>
+    <string-array name="second_display_entries">
+        <item>Bottom screen there</item>
+        <item>Top screen there</item>
+        <item>Both screens on both</item>
+        <item>Off</item>
+    </string-array>
+    <string-array name="second_display_values">
+        <item>bottom</item>
+        <item>top</item>
+        <item>both</item>
+        <item>off</item>
+    </string-array>
 </resources>

@@ -7,6 +7,9 @@ import android.view.Surface
  * these act on a single global session. Settings loads it only to sign in to RetroAchievements.
  */
 object NativeLib {
+    const val MAIN_DISPLAY = 0
+    const val SECOND_DISPLAY = 1
+
     init {
         System.loadLibrary("ninds")
     }
@@ -54,8 +57,10 @@ object NativeLib {
 
     external fun nativeStart()
     external fun nativeShutdown()
-    external fun nativeSetSurface(surface: Surface?)
+    /** [display]: [MAIN_DISPLAY], or [SECOND_DISPLAY] (dual-screen device or external monitor). */
+    external fun nativeSetSurface(display: Int, surface: Surface?)
     external fun nativeSetLayout(
+        display: Int,
         tx: Int, ty: Int, tw: Int, th: Int, topShown: Boolean,
         bx: Int, by: Int, bw: Int, bh: Int, bottomShown: Boolean,
     )

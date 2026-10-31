@@ -162,6 +162,7 @@
     <string name="pref_cat_video">Video</string>
     <string name="pref_layout_portrait">Layout in portrait</string>
     <string name="pref_layout_landscape">Layout in landscape</string>
+    <string name="pref_second_display">Second display (dual-screen or monitor)</string>
     <string name="pref_swap">Swap screens</string>
     <string name="pref_filter">Screen filter</string>
     <string name="pref_integer">Integer scaling</string>

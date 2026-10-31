@@ -178,21 +178,22 @@ void Presenter::stop() {
   hi_back_.release_buffer();
 }
 
-void Presenter::set_window(ANativeWindow* window) {
+void Presenter::set_window(int display, ANativeWindow* window) {
   std::unique_lock<std::mutex> lock(mu_);
-  if (pending_window_ && pending_window_ != window) ANativeWindow_release(pending_window_);
-  pending_window_ = window;
-  window_change_ = true;
+  ANativeWindow*& pending = pending_window_[display];
+  if (pending && pending != window) ANativeWindow_release(pending);
+  pending = window;
+  window_change_[display] = true;
   const uint64_t gen = ++window_gen_;
   cv_.notify_all();
   if (!thread_.joinable()) return;
   ack_cv_.wait(lock, [&] { return window_done_ >= gen || quit_; });
 }
 
-void Presenter::set_layout(const ScreenRect& top, const ScreenRect& bottom) {
+void Presenter::set_layout(int display, const ScreenRect& top, const ScreenRect& bottom) {
   std::lock_guard<std::mutex> lock(mu_);
-  rect_[0] = top;
-  rect_[1] = bottom;
+  rect_[display][0] = top;
+  rect_[display][1] = bottom;
   dirty_ = true;
   cv_.notify_all();
 }
@@ -235,12 +236,19 @@ bool Presenter::init_gl() {
   return true;
 }
 
-bool Presenter::make_current(ANativeWindow* w) {
+bool Presenter::make_surface(int d) {
   if (!init_gl()) return false;
-  surface_ = eglCreateWindowSurface(display_, config_, w, nullptr);
-  if (surface_ == EGL_NO_SURFACE) { LOGW("eglCreateWindowSurface failed: %x", eglGetError()); return false; }
-  if (!eglMakeCurrent(display_, surface_, surface_, context_)) { LOGW("eglMakeCurrent failed"); return false; }
-  eglSwapInterval(display_, 1);
+  surface_[d] = eglCreateWindowSurface(display_, config_, window_[d], nullptr);
+  if (surface_[d] == EGL_NO_SURFACE) { LOGW("eglCreateWindowSurface failed: %x", eglGetError()); return false; }
+  if (!eglMakeCurrent(display_, surface_[d], surface_[d], context_)) { LOGW("eglMakeCurrent failed"); return false; }
+  // The main display paces the presenter; the second one never waits for its
+  // own vsync, which would halve the rate when both are shown.
+  eglSwapInterval(display_, d == MAIN ? 1 : 0);
+  return init_programs();
+}
+
+// The shared GL objects, made once with any surface current.
+bool Presenter::init_programs() {
   if (!program_) {
     GLuint vs = compile(GL_VERTEX_SHADER, kVertex), fs = compile(GL_FRAGMENT_SHADER, kFragment);
     if (!vs || !fs) return false;
@@ -267,17 +275,19 @@ bool Presenter::make_current(ANativeWindow* w) {
   return true;
 }
 
-void Presenter::release_surface() {
+void Presenter::release_surface(int d) {
   if (display_ != EGL_NO_DISPLAY) eglMakeCurrent(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-  if (surface_ != EGL_NO_SURFACE) eglDestroySurface(display_, surface_);
-  surface_ = EGL_NO_SURFACE;
-  if (window_) ANativeWindow_release(window_);
-  window_ = nullptr;
+  if (surface_[d] != EGL_NO_SURFACE) eglDestroySurface(display_, surface_[d]);
+  surface_[d] = EGL_NO_SURFACE;
+  if (window_[d]) ANativeWindow_release(window_[d]);
+  window_[d] = nullptr;
 }
 
 void Presenter::release_all() {
-  if (display_ != EGL_NO_DISPLAY && surface_ != EGL_NO_SURFACE) {
-    eglMakeCurrent(display_, surface_, surface_, context_);
+  // Any live surface will do to make the context current for the deletes.
+  EGLSurface any = surface_[MAIN] != EGL_NO_SURFACE ? surface_[MAIN] : surface_[SECOND];
+  if (display_ != EGL_NO_DISPLAY && any != EGL_NO_SURFACE) {
+    eglMakeCurrent(display_, any, any, context_);
     if (program_) glDeleteProgram(program_);
     if (tex_[0]) glDeleteTextures(2, tex_);
     if (xbrz_prog_) glDeleteProgram(xbrz_prog_);
@@ -294,16 +304,16 @@ void Presenter::release_all() {
   drop_imports(true);
   hi_layer8_tex_ = 0;
   for (Ghost& g : ghost_) {
-    if (surface_ != EGL_NO_SURFACE) { GLuint t[5] = {g.desc, g.oper, g.line, g.native, g.layer}; glDeleteTextures(5, t); }
+    if (any != EGL_NO_SURFACE) { GLuint t[5] = {g.desc, g.oper, g.line, g.native, g.layer}; glDeleteTextures(5, t); }
     g = Ghost{};
   }
-  if (ghost_fbo_[0] && surface_ != EGL_NO_SURFACE) glDeleteFramebuffers(2, ghost_fbo_);
+  if (ghost_fbo_[0] && any != EGL_NO_SURFACE) glDeleteFramebuffers(2, ghost_fbo_);
   ghost_fbo_[0] = ghost_fbo_[1] = 0;
   program_ = 0;
   tex_[0] = tex_[1] = 0;
   xbrz_prog_ = xbrz_vbo_ = 0;
   xbrz_fbo_[0] = xbrz_fbo_[1] = xbrz_tex_[0] = xbrz_tex_[1] = 0;
-  release_surface();
+  for (int d = 0; d < DISPLAYS; ++d) release_surface(d);
   if (context_ != EGL_NO_CONTEXT) eglDestroyContext(display_, context_);
   context_ = EGL_NO_CONTEXT;
   if (display_ != EGL_NO_DISPLAY) eglTerminate(display_);
@@ -433,7 +443,7 @@ void Presenter::drop_imports(bool all) {
   for (size_t i = 0; i < imported_.size();) {
     Imported& im = imported_[i];
     if (!all && (im.buffer == hi_front_.buffer || im.buffer == hi_back_.buffer)) { ++i; continue; }
-    if (surface_ != EGL_NO_SURFACE) glDeleteTextures(1, &im.tex);
+    if (context_ != EGL_NO_CONTEXT && eglGetCurrentContext() == context_) glDeleteTextures(1, &im.tex);
     if (destroy_image) destroy_image(display_, static_cast<EGLImageKHR>(im.image));
     AHardwareBuffer_release(im.buffer);
     imported_.erase(imported_.begin() + static_cast<long>(i));
@@ -520,12 +530,11 @@ void Presenter::store_ghost(int screen) {
 }
 
 void Presenter::draw() {
-  ScreenRect rect[2];
+  ScreenRect rect[DISPLAYS][2];
   int filter;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    rect[0] = rect_[0];
-    rect[1] = rect_[1];
+    std::memcpy(rect, rect_, sizeof rect);
     filter = filter_;
     if (fresh_) {
       front_.swap(back_); std::memcpy(back_.data(), front_.data(), W * H * 2 * 4); fresh_ = false; have_frame_ = false;
@@ -534,6 +543,11 @@ void Presenter::draw() {
     }
     dirty_ = false;
   }
+  // The uploads and passes below run once, with whichever surface is live.
+  const int first = surface_[MAIN] != EGL_NO_SURFACE ? MAIN : SECOND;
+  if (surface_[first] == EGL_NO_SURFACE || !eglMakeCurrent(display_, surface_[first], surface_[first], context_)) return;
+  bool shown[2];
+  for (int s = 0; s < 2; ++s) shown[s] = (surface_[MAIN] != EGL_NO_SURFACE && rect[MAIN][s].shown) || (surface_[SECOND] != EGL_NO_SURFACE && rect[SECOND][s].shown);
   if (!have_frame_) {
     for (int s = 0; s < 2; ++s) {
       glBindTexture(GL_TEXTURE_2D, tex_[s]);
@@ -558,7 +572,7 @@ void Presenter::draw() {
     glActiveTexture(GL_TEXTURE0);
     glViewport(0, 0, W * XBRZ_SCALE, H * XBRZ_SCALE);
     for (int s = 0; s < 2; ++s) {
-      if (!rect[s].shown || !xbrz_stale_[s]) continue;
+      if (!shown[s] || !xbrz_stale_[s]) continue;
       glBindFramebuffer(GL_FRAMEBUFFER, xbrz_fbo_[s]);
       glBindTexture(GL_TEXTURE_2D, tex_[s]);
       glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -580,7 +594,16 @@ void Presenter::draw() {
     }
     if (hi_front_.buffer && !hi_layer8_tex_) hi_screen = -1;   // the import failed: the 1x picture
   }
-  const EGLint sw = ANativeWindow_getWidth(window_), sh = ANativeWindow_getHeight(window_);
+  // The second display first: the main one's swap waits for vsync.
+  for (int d : {SECOND, MAIN}) {
+    if (surface_[d] == EGL_NO_SURFACE) continue;
+    if (!eglMakeCurrent(display_, surface_[d], surface_[d], context_)) continue;
+    draw_display(d, rect[d], filter, xbrz, hi_screen);
+  }
+}
+
+void Presenter::draw_display(int d, const ScreenRect* rect, int filter, bool xbrz, int hi_screen) {
+  const EGLint sw = ANativeWindow_getWidth(window_[d]), sh = ANativeWindow_getHeight(window_[d]);
   glViewport(0, 0, sw, sh);
   glDisable(GL_SCISSOR_TEST);
   glClearColor(0.f, 0.f, 0.f, 1.f);
@@ -650,38 +673,44 @@ void Presenter::draw() {
     glUniform2f(u_out_, static_cast<float>(r.w), static_cast<float>(r.h));
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
   }
-  if (!eglSwapBuffers(display_, surface_)) {
+  if (!eglSwapBuffers(display_, surface_[d])) {
     const EGLint e = eglGetError();
     if (e == EGL_BAD_SURFACE || e == EGL_BAD_NATIVE_WINDOW) {
       // The surface went away under us; wait for the next window.
-      release_surface();
+      release_surface(d);
     }
   }
 }
 
 void Presenter::run() {
   pthread_setname_np(pthread_self(), "NinDS present");
+  auto any_change = [&] { return window_change_[MAIN] || window_change_[SECOND]; };
+  auto any_window = [&] { return window_[MAIN] || window_[SECOND]; };
   for (;;) {
-    ANativeWindow* adopt = nullptr;
-    bool change = false;
+    ANativeWindow* adopt[DISPLAYS] = {};
+    bool change[DISPLAYS] = {};
     uint64_t gen = 0;
     {
       std::unique_lock<std::mutex> lock(mu_);
-      cv_.wait_for(lock, std::chrono::milliseconds(250), [&] { return quit_ || window_change_ || (dirty_ && window_); });
+      cv_.wait_for(lock, std::chrono::milliseconds(250), [&] { return quit_ || any_change() || (dirty_ && any_window()); });
       if (quit_) break;
-      if (window_change_) {
-        change = true;
-        adopt = pending_window_;
-        pending_window_ = nullptr;
-        window_change_ = false;
-        gen = window_gen_;
+      for (int d = 0; d < DISPLAYS; ++d) {
+        if (!window_change_[d]) continue;
+        change[d] = true;
+        adopt[d] = pending_window_[d];
+        pending_window_[d] = nullptr;
+        window_change_[d] = false;
       }
+      gen = window_gen_;
     }
-    if (change) {
-      release_surface();
-      if (adopt) {
-        window_ = adopt;
-        if (!make_current(window_)) release_surface();
+    if (change[MAIN] || change[SECOND]) {
+      for (int d = 0; d < DISPLAYS; ++d) {
+        if (!change[d]) continue;
+        release_surface(d);
+        if (adopt[d]) {
+          window_[d] = adopt[d];
+          if (!make_surface(d)) release_surface(d);
+        }
       }
       {
         std::lock_guard<std::mutex> lock(mu_);
@@ -690,7 +719,7 @@ void Presenter::run() {
       }
       ack_cv_.notify_all();
     }
-    if (window_ && surface_ != EGL_NO_SURFACE) {
+    if (surface_[MAIN] != EGL_NO_SURFACE || surface_[SECOND] != EGL_NO_SURFACE) {
       bool want;
       {
         std::lock_guard<std::mutex> lock(mu_);
@@ -701,7 +730,7 @@ void Presenter::run() {
   }
   release_all();
   std::lock_guard<std::mutex> lock(mu_);
-  if (pending_window_) { ANativeWindow_release(pending_window_); pending_window_ = nullptr; }
+  for (ANativeWindow*& w : pending_window_) if (w) { ANativeWindow_release(w); w = nullptr; }
   window_done_ = window_gen_;
   ack_cv_.notify_all();
 }

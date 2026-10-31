@@ -118,6 +118,14 @@
             app:key="layout_landscape"
             app:title="@string/pref_layout_landscape"
             app:useSimpleSummaryProvider="true" />
+        <ListPreference
+            app:defaultValue="bottom"
+            app:entries="@array/second_display_entries"
+            app:entryValues="@array/second_display_values"
+            app:iconSpaceReserved="false"
+            app:key="second_display"
+            app:title="@string/pref_second_display"
+            app:useSimpleSummaryProvider="true" />
         <SwitchPreferenceCompat
             app:defaultValue="false"
             app:iconSpaceReserved="false"

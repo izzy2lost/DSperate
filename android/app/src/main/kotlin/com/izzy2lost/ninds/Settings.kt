@@ -58,6 +58,8 @@ class Settings private constructor(private val file: File) {
     val texFilter get() = getBoolean(TEX_FILTER, false)
     val gpuScale get() = getString(GPU_SCALE, "1").toIntOrNull()?.coerceIn(1, 8) ?: 1
     val firmwareBoot get() = getBoolean(FIRMWARE_BOOT, false)
+    /** What a second display (dual-screen device or external monitor) shows: SECOND_*. */
+    val secondDisplay get() = getString(SECOND_DISPLAY, SECOND_BOTTOM)
     /** off, internet, auto, host, guest or join. Before this list it was the INTERNET switch. */
     val netMode get() = getString(NET_MODE, if (getBoolean(INTERNET, false)) "internet" else "off")
     val lanAddress get() = getString(LAN_ADDRESS, "").trim()
@@ -165,6 +167,11 @@ class Settings private constructor(private val file: File) {
         const val FF_TOGGLE = "ff_toggle"
         const val AUTO_SAVE_STATE = "auto_save_state"
         const val LAYOUT_LANDSCAPE = "layout_landscape"
+        const val SECOND_DISPLAY = "second_display"
+        const val SECOND_BOTTOM = "bottom"   // the bottom screen there, the top one on the device
+        const val SECOND_TOP = "top"         // the top screen there, the bottom one (touch) on the device
+        const val SECOND_BOTH = "both"       // both screens on both
+        const val SECOND_OFF = "off"
         const val LAYOUT_PORTRAIT = "layout_portrait"
         const val SWAP_SCREENS = "swap_screens"
         const val FILTER = "filter"

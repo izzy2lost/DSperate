@@ -23,6 +23,7 @@ import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.MotionEvent
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.View
 import android.widget.GridLayout
@@ -66,6 +67,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
     private var booted = false
     private var exiting = false
     private var surfaceReady = false
+    private lateinit var second: SecondDisplay
+    private var secondSurface: Surface? = null
 
     private var activityPaused = false
     private var dialogHolds = 0
@@ -124,6 +127,14 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         binding.fpsText.bringToFront()
         binding.bootOverlay.bringToFront()
         binding.root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateLayout() }
+        second = SecondDisplay(this, handler, object : SecondDisplay.Callbacks {
+            override fun onSecondSurface(surface: Surface?) {
+                secondSurface = surface
+                if (booted) NativeLib.nativeSetSurface(NativeLib.SECOND_DISPLAY, surface)
+            }
+            override fun onSecondDisplayChanged() = updateLayout()
+            override fun onSecondTouch(x: Int, y: Int, down: Boolean) { if (booted && !controls.suspended) NativeLib.nativeSetTouch(x, y, down) }
+        })
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() = showMenu()
@@ -183,7 +194,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         binding.bootOverlay.visibility = View.GONE
         applyRuntimeSettings()
         NativeLib.nativeStart()
-        if (surfaceReady) NativeLib.nativeSetSurface(binding.surface.holder.surface)
+        if (surfaceReady) NativeLib.nativeSetSurface(NativeLib.MAIN_DISPLAY, binding.surface.holder.surface)
+        secondSurface?.let { NativeLib.nativeSetSurface(NativeLib.SECOND_DISPLAY, it) }
         updateLayout()
         updatePause()
         stateMessage?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
@@ -199,6 +211,18 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
     }
 
     // ---- Lifecycle ------------------------------------------------------------------------
+
+    // The second display shows the game only while it is in front: a monitor must not keep the
+    // last frame up behind the library or another app.
+    override fun onStart() {
+        super.onStart()
+        second.start()
+    }
+
+    override fun onStop() {
+        second.stop()
+        super.onStop()
+    }
 
     override fun onResume() {
         super.onResume()
@@ -305,6 +329,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         controls.faceColours = settings.faceColours
         updateControlsVisibility()
         binding.fpsText.visibility = if (settings.showFps) View.VISIBLE else View.GONE
+        second.enabled = settings.secondDisplay != Settings.SECOND_OFF
         if (!booted) return
         NativeLib.nativeSetFilter(settings.filter)
         NativeLib.nativeSetFrameskip(settings.frameskip)
@@ -344,13 +369,13 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         surfaceReady = true
-        if (booted) NativeLib.nativeSetSurface(holder.surface)
+        if (booted) NativeLib.nativeSetSurface(NativeLib.MAIN_DISPLAY, holder.surface)
         updateLayout()
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         surfaceReady = false
-        if (booted) NativeLib.nativeSetSurface(null)
+        if (booted) NativeLib.nativeSetSurface(NativeLib.MAIN_DISPLAY, null)
     }
 
     private fun isPortrait() = binding.root.height > binding.root.width
@@ -364,15 +389,41 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         val portrait = h > w
         val reserve = if (portrait && controls.controlsVisible) (h * 0.40f).toInt() else 0
         val gap = (settings.screenGap * resources.displayMetrics.density).toInt()
-        val p = ScreenLayout.compute(w, h, currentLayoutMode(), settings.swapScreens, settings.integerScale, gap, reserve)
+        val swap = settings.swapScreens
+        // With a second display, one screen each (swap trades them), or both on both.
+        val dual = second.active
+        val split = dual && settings.secondDisplay != Settings.SECOND_BOTH
+        val mainMode = when {
+            !split -> currentLayoutMode()
+            settings.secondDisplay == Settings.SECOND_TOP -> ScreenLayout.BOTTOM_ONLY
+            else -> ScreenLayout.TOP_ONLY
+        }
+        val p = ScreenLayout.compute(w, h, mainMode, swap, settings.integerScale, gap, reserve)
         controls.portraitBandTop = if (portrait) h - reserve else 0
         controls.touchScreenRect = if (p.bottomShown) p.bottom else null
         controls.screenRects = listOfNotNull(p.top.takeIf { p.topShown }, p.bottom.takeIf { p.bottomShown }).distinct()
         controls.relayout()
+        val q = if (dual) {
+            val sw = second.width
+            val sh = second.height
+            val secondMode = when {
+                !split -> if (sh > sw) settings.layoutPortrait else settings.layoutLandscape
+                mainMode == ScreenLayout.TOP_ONLY -> ScreenLayout.BOTTOM_ONLY
+                else -> ScreenLayout.TOP_ONLY
+            }
+            ScreenLayout.compute(sw, sh, secondMode, swap, settings.integerScale, gap)
+        } else null
+        second.touchRect = if (q != null && q.bottomShown) q.bottom else null
         if (booted) {
             NativeLib.nativeSetLayout(
+                NativeLib.MAIN_DISPLAY,
                 p.top.left, p.top.top, p.top.width(), p.top.height(), p.topShown,
                 p.bottom.left, p.bottom.top, p.bottom.width(), p.bottom.height(), p.bottomShown,
+            )
+            NativeLib.nativeSetLayout(
+                NativeLib.SECOND_DISPLAY,
+                q?.top?.left ?: 0, q?.top?.top ?: 0, q?.top?.width() ?: 0, q?.top?.height() ?: 0, q?.topShown ?: false,
+                q?.bottom?.left ?: 0, q?.bottom?.top ?: 0, q?.bottom?.width() ?: 0, q?.bottom?.height() ?: 0, q?.bottomShown ?: false,
             )
         }
     }
