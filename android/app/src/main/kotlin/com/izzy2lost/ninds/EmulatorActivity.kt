@@ -415,6 +415,16 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
     private fun recomputePadMask() {
         var m = 0
         for (k in heldKeys) for (a in mapping.actionsFor(k)) if (a.isDsButton) m = m or (1 shl a.dsBit)
+        // Start + Select together opens the menu, for pads without a spare button to bind it to.
+        // The held keys are dropped so the game sees both released and the combo fires once.
+        val combo = (1 shl DsButton.START) or (1 shl DsButton.SELECT)
+        if (m and combo == combo) {
+            heldKeys.clear()
+            padMask = 0
+            pushButtons()
+            showMenu()
+            return
+        }
         padMask = m
         pushButtons()
     }
