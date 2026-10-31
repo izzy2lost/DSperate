@@ -1,9 +1,9 @@
 #!/bin/sh
 # Compile the frontend's Vulkan present shader to SPIR-V and check the blob in.
 #
-# The .spv files next to the .comp sources are generated but tracked, so a
+# The .spv files next to the .comp/.vert/.frag sources are generated but tracked, so a
 # build needs no shader compiler -- gpu_present.cpp .incbin's them, the way
-# io/dsi_font.cpp does its font tables. Run this after editing any .comp and
+# io/dsi_font.cpp does its font tables. Run this after editing any shader and
 # commit the .spv beside it.
 #
 #   tools/gen_shaders.sh
@@ -27,9 +27,10 @@ else
   exit 1
 fi
 
-for f in "$DIR"/src/frontend/sdl/shaders/*.comp; do
+# x.comp -> x.spv; x.vert / x.frag -> x_vert.spv / x_frag.spv.
+for f in "$DIR"/src/frontend/sdl/shaders/*.comp "$DIR"/src/frontend/sdl/shaders/*.vert "$DIR"/src/frontend/sdl/shaders/*.frag; do
   [ -e "$f" ] || continue
-  out="${f%.comp}.spv"
+  case "$f" in *.comp) out="${f%.comp}.spv" ;; *) out="${f%.*}_${f##*.}.spv" ;; esac
   case "$GV" in
     *glslc) "$GV" -O --target-env=vulkan1.1 "$f" -o "$out" ;;
     *)      log=$("$GV" -V --target-env vulkan1.1 "$f" -o "$out") || { echo "$log" >&2; echo "gen_shaders: $f FAILED" >&2; exit 1; } ;;

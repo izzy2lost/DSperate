@@ -21,25 +21,31 @@ using gpu::vk::Buffer;
 using gpu::vk::Device;
 using gpu::vk::DeviceInternal;
 
+// Outside the anonymous namespace: inside it GCC gives these internal linkage
+// and the link misses the .incbin symbols.
+extern "C" const unsigned char ds_present_vert_data[], ds_present_vert_end[], ds_present_frag_data[], ds_present_frag_end[];
+
 namespace {
 
 // SPIR-V linked in with .incbin: no shader compiler needed to build.
-__asm__(".section .rodata\n.balign 4\n.globl ds_present_spv_data\nds_present_spv_data:\n"
-        ".incbin \"" DSPERATE_PRESENT_SHADER_DIR "/present.spv\"\n"
-        ".globl ds_present_spv_end\nds_present_spv_end:\n.previous\n");
-extern "C" const unsigned char ds_present_spv_data[], ds_present_spv_end[];
+__asm__(".section .rodata\n.balign 4\n.globl ds_present_vert_data\nds_present_vert_data:\n"
+        ".incbin \"" DSPERATE_PRESENT_SHADER_DIR "/present_vert.spv\"\n"
+        ".globl ds_present_vert_end\nds_present_vert_end:\n"
+        ".balign 4\n.globl ds_present_frag_data\nds_present_frag_data:\n"
+        ".incbin \"" DSPERATE_PRESENT_SHADER_DIR "/present_frag.spv\"\n"
+        ".globl ds_present_frag_end\nds_present_frag_end:\n.previous\n");
 
 constexpr u32 kFrameWords = 256 * 192;     // one screen
 constexpr u32 kSlotWords = 2 * kFrameWords;  // both screens
 constexpr int kSlots = 2;                  // frames in flight + the one being written
 constexpr int kMaxBufs = 8;
-constexpr u32 kBindings = 4;               // dst image, source frames, overlay, grid table
+constexpr u32 kBindings = 3;               // source frames, overlay, grid table (bindings 1..3)
 
-struct Push {
+struct Push {      // present.vert / present.frag
+  s32 rect[4];     // the quad in the logical frame
   u32 a[4];        // presented w, h; logical w, h
-  u32 b[4];        // rot, nviews, alpha | overlay | grid, source base (words)
-  s32 rect[2][4];
-  s32 view[2][4];
+  u32 b[4];        // rot, mode (0 view, 1 overlay), source base (words), view | grid on << 8 | grid brightness << 16
+  float s[4];      // view: 256/w, 192/h, 0.5/w, 0.5/h
 };
 
 } // namespace
@@ -50,7 +56,7 @@ struct GpuPresent::Impl {
   const Api* a = nullptr;
   VkPhysicalDeviceMemoryProperties memprops{};
 
-  struct Imported { VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; VkDescriptorSet set[kSlots] = {VK_NULL_HANDLE, VK_NULL_HANDLE}; int fd = -1; u32 stride = 0; };
+  struct Imported { VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; VkFramebuffer fb = VK_NULL_HANDLE; VkDescriptorSet set[kSlots] = {VK_NULL_HANDLE, VK_NULL_HANDLE}; int fd = -1; u32 stride = 0; };
   Buffer over[kSlots];                 // frontend's overlay per slot (logical frame, pitch = lw)
   Buffer tab[kSlots];
   SDL_Rect over_dirty[kSlots] = {};    // drawn region per slot, cleared before next use
@@ -60,10 +66,13 @@ struct GpuPresent::Impl {
   u32 w = 0, h = 0;
 
   Buffer src;                                  // kSlots x kSlotWords
-  VkShaderModule mod = VK_NULL_HANDLE;
+  VkShaderModule vmod = VK_NULL_HANDLE, fmod = VK_NULL_HANDLE;
   VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
-  VkPipeline pipe = VK_NULL_HANDLE;
+  VkRenderPass rp = VK_NULL_HANDLE;            // on an imported buffer: cleared (the letterbox), stored
+  VkPipeline pipe = VK_NULL_HANDLE;            // views, opaque (a blend costs a fifth of the pass on Mali)
+  VkPipeline pipe_fade = VK_NULL_HANDLE;       // a fading inset: blended at the constant alpha
+  VkPipeline pipe_over = VK_NULL_HANDLE;       // the frontend overlay: blended at its own alpha
   VkDescriptorPool pool = VK_NULL_HANDLE;
   VkCommandPool cmdpool = VK_NULL_HANDLE;
   VkCommandBuffer cmd[kSlots]{};
@@ -86,14 +95,15 @@ struct GpuPresent::Impl {
   }
 
   void drop_import(Imported& b) {
+    if (b.fb) a->vkDestroyFramebuffer(vk->dev, b.fb, nullptr);
     if (b.view) a->vkDestroyImageView(vk->dev, b.view, nullptr);
     if (b.img) a->vkDestroyImage(vk->dev, b.img, nullptr);
     if (b.mem) a->vkFreeMemory(vk->dev, b.mem, nullptr);
-    b.view = VK_NULL_HANDLE; b.img = VK_NULL_HANDLE; b.mem = VK_NULL_HANDLE;
+    b.fb = VK_NULL_HANDLE; b.view = VK_NULL_HANDLE; b.img = VK_NULL_HANDLE; b.mem = VK_NULL_HANDLE;
   }
 
-  // Import a tier dma-buf as a LINEAR B8G8R8A8 image and point a descriptor
-  // set at it.
+  // Import a tier dma-buf as a LINEAR B8G8R8A8 image, the render pass's
+  // colour attachment.
   bool import(const ScanoutOut::DmabufPlane& p, Imported& b, std::string* why) {
     const VkFormat fmt = VK_FORMAT_B8G8R8A8_UNORM;
     const bool mod = dev->limits().drm_modifier;
@@ -116,7 +126,7 @@ struct GpuPresent::Impl {
     ii.mipLevels = 1; ii.arrayLayers = 1;
     ii.samples = VK_SAMPLE_COUNT_1_BIT;
     ii.tiling = mod ? VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT : VK_IMAGE_TILING_LINEAR;
-    ii.usage = VK_IMAGE_USAGE_STORAGE_BIT;
+    ii.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (a->vkCreateImage(vk->dev, &ii, nullptr, &b.img) != VK_SUCCESS) { if (why) *why = "vkCreateImage (imported) failed"; return false; }
@@ -143,17 +153,18 @@ struct GpuPresent::Impl {
     VkImageViewCreateInfo vi{}; vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO; vi.image = b.img;
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = fmt; vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     if (a->vkCreateImageView(vk->dev, &vi, nullptr, &b.view) != VK_SUCCESS) { if (why) *why = "vkCreateImageView failed"; drop_import(b); return false; }
-    VkDescriptorImageInfo dii{}; dii.imageView = b.view; dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkFramebufferCreateInfo fci{}; fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fci.renderPass = rp;
+    fci.attachmentCount = 1; fci.pAttachments = &b.view; fci.width = p.width; fci.height = p.height; fci.layers = 1;
+    if (a->vkCreateFramebuffer(vk->dev, &fci, nullptr, &b.fb) != VK_SUCCESS) { if (why) *why = "vkCreateFramebuffer on the import failed"; drop_import(b); return false; }
     VkDescriptorBufferInfo dbi{}; dbi.buffer = gpu::vk::vk_buf(src); dbi.range = VK_WHOLE_SIZE;
     for (int s = 0; s < kSlots; ++s) {
       VkDescriptorBufferInfo doi{}; doi.buffer = gpu::vk::vk_buf(over[s]); doi.range = VK_WHOLE_SIZE;
       VkDescriptorBufferInfo dti{}; dti.buffer = gpu::vk::vk_buf(tab[s]); dti.range = VK_WHOLE_SIZE;
-      const VkDescriptorBufferInfo* bi[kBindings] = {nullptr, &dbi, &doi, &dti};
+      const VkDescriptorBufferInfo* bi[kBindings] = {&dbi, &doi, &dti};
       VkWriteDescriptorSet w[kBindings]{};
       for (u32 i = 0; i < kBindings; ++i) {
-        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[i].dstSet = b.set[s]; w[i].dstBinding = i; w[i].descriptorCount = 1;
-        w[i].descriptorType = i == 0 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        if (i == 0) w[i].pImageInfo = &dii; else w[i].pBufferInfo = bi[i];
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[i].dstSet = b.set[s]; w[i].dstBinding = i + 1; w[i].descriptorCount = 1;
+        w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = bi[i];
       }
       a->vkUpdateDescriptorSets(vk->dev, kBindings, w, 0, nullptr);
     }
@@ -211,11 +222,15 @@ struct GpuPresent::Impl {
     if (cmdpool) a->vkDestroyCommandPool(vk->dev, cmdpool, nullptr);
     if (pool) a->vkDestroyDescriptorPool(vk->dev, pool, nullptr);
     if (pipe) a->vkDestroyPipeline(vk->dev, pipe, nullptr);
+    if (pipe_fade) a->vkDestroyPipeline(vk->dev, pipe_fade, nullptr);
+    if (pipe_over) a->vkDestroyPipeline(vk->dev, pipe_over, nullptr);
+    if (rp) a->vkDestroyRenderPass(vk->dev, rp, nullptr);
     for (int s = 0; s < kSlots; ++s) if (over[s]) dev->free(over[s]);
     for (int s = 0; s < kSlots; ++s) if (tab[s]) dev->free(tab[s]);
     if (layout) a->vkDestroyPipelineLayout(vk->dev, layout, nullptr);
     if (dsl) a->vkDestroyDescriptorSetLayout(vk->dev, dsl, nullptr);
-    if (mod) a->vkDestroyShaderModule(vk->dev, mod, nullptr);
+    if (vmod) a->vkDestroyShaderModule(vk->dev, vmod, nullptr);
+    if (fmod) a->vkDestroyShaderModule(vk->dev, fmod, nullptr);
     if (src) dev->free(src);
     if (frames) {
       const double k = 1.0 / (static_cast<double>(frames) * 1e6);
@@ -241,7 +256,8 @@ std::unique_ptr<GpuPresent> GpuPresent::open(ScanoutOut& out, std::string* why) 
   d.vk = d.dev->internal();
   if (!d.vk || !d.vk->api) return fail("no Vulkan context");
   d.a = d.vk->api;
-  if (!d.a->vkCreateImage || !d.a->vkGetMemoryFdPropertiesKHR) return fail("image entry points missing");
+  if (!d.a->vkCreateImage || !d.a->vkGetMemoryFdPropertiesKHR || !d.a->vkCreateGraphicsPipelines || !d.a->vkCmdSetBlendConstants) return fail("image or graphics entry points missing");
+  if (!d.dev->limits().graphics) return fail("the queue does no graphics");
   d.a->vkGetPhysicalDeviceMemoryProperties(d.vk->phys, &d.memprops);
 
   d.src = d.dev->alloc(sizeof(u32) * kSlotWords * kSlots, Access::CpuWrite);
@@ -249,28 +265,65 @@ std::unique_ptr<GpuPresent> GpuPresent::open(ScanoutOut& out, std::string* why) 
   for (int s = 0; s < kSlots; ++s) { d.tab[s] = d.dev->alloc(sizeof(u32) * 128, Access::CpuWrite); if (!d.tab[s]) return fail("grid table allocation failed"); std::memset(d.tab[s].ptr, 0, sizeof(u32) * 128); }
 
   VkShaderModuleCreateInfo si{}; si.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-  si.codeSize = static_cast<size_t>(ds_present_spv_end - ds_present_spv_data);
-  si.pCode = reinterpret_cast<const u32*>(ds_present_spv_data);
-  if (d.a->vkCreateShaderModule(d.vk->dev, &si, nullptr, &d.mod) != VK_SUCCESS) return fail("present.spv rejected by the driver");
+  si.codeSize = static_cast<size_t>(ds_present_vert_end - ds_present_vert_data);
+  si.pCode = reinterpret_cast<const u32*>(ds_present_vert_data);
+  if (d.a->vkCreateShaderModule(d.vk->dev, &si, nullptr, &d.vmod) != VK_SUCCESS) return fail("present_vert.spv rejected by the driver");
+  si.codeSize = static_cast<size_t>(ds_present_frag_end - ds_present_frag_data);
+  si.pCode = reinterpret_cast<const u32*>(ds_present_frag_data);
+  if (d.a->vkCreateShaderModule(d.vk->dev, &si, nullptr, &d.fmod) != VK_SUCCESS) return fail("present_frag.spv rejected by the driver");
 
   VkDescriptorSetLayoutBinding b[kBindings]{};
   for (u32 i = 0; i < kBindings; ++i) {
-    b[i].binding = i; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    b[i].descriptorType = i == 0 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    b[i].binding = i + 1; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
   }
   VkDescriptorSetLayoutCreateInfo dl{}; dl.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; dl.bindingCount = kBindings; dl.pBindings = b;
   if (d.a->vkCreateDescriptorSetLayout(d.vk->dev, &dl, nullptr, &d.dsl) != VK_SUCCESS) return fail("descriptor set layout failed");
-  VkPushConstantRange pcr{}; pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT; pcr.size = sizeof(Push);
+  VkPushConstantRange pcr{}; pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; pcr.size = sizeof(Push);
   VkPipelineLayoutCreateInfo pl{}; pl.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pl.setLayoutCount = 1; pl.pSetLayouts = &d.dsl;
   pl.pushConstantRangeCount = 1; pl.pPushConstantRanges = &pcr;
   if (d.a->vkCreatePipelineLayout(d.vk->dev, &pl, nullptr, &d.layout) != VK_SUCCESS) return fail("pipeline layout failed");
-  VkComputePipelineCreateInfo cp{}; cp.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-  cp.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; cp.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-  cp.stage.module = d.mod; cp.stage.pName = "main"; cp.layout = d.layout;
-  if (d.a->vkCreateComputePipelines(d.vk->dev, VK_NULL_HANDLE, 1, &cp, nullptr, &d.pipe) != VK_SUCCESS) return fail("present pipeline failed to compile");
 
-  VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxBufs * kSlots}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxBufs * kSlots * (kBindings - 1)}};
-  VkDescriptorPoolCreateInfo dp{}; dp.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dp.maxSets = kMaxBufs * kSlots; dp.poolSizeCount = 2; dp.pPoolSizes = ps;
+  // The buffer is cleared in the tile (the letterbox, no load) and written
+  // out once; the tier's reader comes after the fence.
+  VkAttachmentDescription at{}; at.format = VK_FORMAT_B8G8R8A8_UNORM; at.samples = VK_SAMPLE_COUNT_1_BIT;
+  at.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; at.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  at.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; at.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+  at.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; at.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+  VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription sp{}; sp.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sp.colorAttachmentCount = 1; sp.pColorAttachments = &ref;
+  VkSubpassDependency dep{}; dep.srcSubpass = 0; dep.dstSubpass = VK_SUBPASS_EXTERNAL;
+  dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; dep.dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+  dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; dep.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+  VkRenderPassCreateInfo rci{}; rci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO; rci.attachmentCount = 1; rci.pAttachments = &at;
+  rci.subpassCount = 1; rci.pSubpasses = &sp; rci.dependencyCount = 1; rci.pDependencies = &dep;
+  if (d.a->vkCreateRenderPass(d.vk->dev, &rci, nullptr, &d.rp) != VK_SUCCESS) return fail("render pass failed");
+
+  VkPipelineShaderStageCreateInfo st[2]{};
+  for (int i = 0; i < 2; ++i) { st[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; st[i].pName = "main"; }
+  st[0].stage = VK_SHADER_STAGE_VERTEX_BIT; st[0].module = d.vmod; st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = d.fmod;
+  VkPipelineVertexInputStateCreateInfo vin{}; vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+  VkPipelineInputAssemblyStateCreateInfo ia{}; ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+  VkPipelineViewportStateCreateInfo vs{}; vs.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO; vs.viewportCount = 1; vs.scissorCount = 1;
+  VkPipelineRasterizationStateCreateInfo rs{}; rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO; rs.cullMode = VK_CULL_MODE_NONE; rs.lineWidth = 1;
+  VkPipelineMultisampleStateCreateInfo ms{}; ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState blend{}; blend.colorWriteMask = 0xF;
+  blend.srcColorBlendFactor = VK_BLEND_FACTOR_CONSTANT_ALPHA; blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA; blend.colorBlendOp = VK_BLEND_OP_ADD;
+  blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO; blend.alphaBlendOp = VK_BLEND_OP_ADD;
+  VkPipelineColorBlendStateCreateInfo cbs{}; cbs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; cbs.attachmentCount = 1; cbs.pAttachments = &blend;
+  const VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_BLEND_CONSTANTS};
+  VkPipelineDynamicStateCreateInfo ds{}; ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO; ds.dynamicStateCount = 3; ds.pDynamicStates = dyn;
+  VkGraphicsPipelineCreateInfo gp{}; gp.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gp.stageCount = 2; gp.pStages = st;
+  gp.pVertexInputState = &vin; gp.pInputAssemblyState = &ia; gp.pViewportState = &vs; gp.pRasterizationState = &rs; gp.pMultisampleState = &ms;
+  gp.pColorBlendState = &cbs; gp.pDynamicState = &ds; gp.layout = d.layout; gp.renderPass = d.rp;
+  if (d.a->vkCreateGraphicsPipelines(d.vk->dev, VK_NULL_HANDLE, 1, &gp, nullptr, &d.pipe) != VK_SUCCESS) return fail("present pipeline failed to compile");
+  blend.blendEnable = VK_TRUE;
+  if (d.a->vkCreateGraphicsPipelines(d.vk->dev, VK_NULL_HANDLE, 1, &gp, nullptr, &d.pipe_fade) != VK_SUCCESS) return fail("fade pipeline failed to compile");
+  blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA; blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+  if (d.a->vkCreateGraphicsPipelines(d.vk->dev, VK_NULL_HANDLE, 1, &gp, nullptr, &d.pipe_over) != VK_SUCCESS) return fail("overlay pipeline failed to compile");
+
+  VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxBufs * kSlots * kBindings};
+  VkDescriptorPoolCreateInfo dp{}; dp.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dp.maxSets = kMaxBufs * kSlots; dp.poolSizeCount = 1; dp.pPoolSizes = &ps;
   if (d.a->vkCreateDescriptorPool(d.vk->dev, &dp, nullptr, &d.pool) != VK_SUCCESS) return fail("descriptor pool failed");
   {
     VkDescriptorSetLayout layouts[kMaxBufs * kSlots]; for (auto& l : layouts) l = d.dsl;
@@ -363,7 +416,7 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
       for (int axis = 0; axis < 2; ++axis) {
         const u32 n = static_cast<u32>(std::max(0, dim[axis])), sn = static_cast<u32>(srcn[axis]);
         if (n == 0 || n > 1024) continue;
-        const u32 min_run = std::max<u32>(2, (n + sn - 1) / sn), pitch = n == 2 * sn ? 2 : 1;
+        const u32 min_run = std::max<u32>(2, (n + sn - 1) / sn), pitch = grid == 0 && n == 2 * sn ? 2 : 1;
         for (u32 s = 0; s < sn; ++s) {
           const u32 x0 = (s * n + sn - 1) / sn, x1 = ((s + 1) * n + sn - 1) / sn;
           if (x1 - x0 >= min_run && s % pitch == 0 && x0 < n) t[v * 64 + axis * 32 + (x0 >> 5)] |= 1u << (x0 & 31);
@@ -372,38 +425,60 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
     }
     d.dev->flush(d.tab[slot], 0, sizeof(u32) * 128);
   }
-  Push pc{};
-  pc.a[0] = d.w; pc.a[1] = d.h; pc.a[2] = static_cast<u32>(lw); pc.a[3] = static_cast<u32>(lh);
   const bool has_over = drawn.w > 0 && drawn.h > 0 && d.over[slot] && d.over_lw == lw && d.over_lh == lh;
   if (has_over) {
     d.over_dirty[slot] = drawn;
     const int y0 = std::max(0, drawn.y), y1 = std::min(lh, drawn.y + drawn.h);
     if (y1 > y0) d.dev->flush(d.over[slot], static_cast<size_t>(y0) * lw * sizeof(u32), static_cast<size_t>(y1 - y0) * lw * sizeof(u32));
   }
-  pc.b[0] = static_cast<u32>(rot); pc.b[1] = static_cast<u32>(nviews > 2 ? 2 : nviews); pc.b[2] = inset_alpha | (has_over ? 0x100u : 0u) | (std::min<u32>(grid, 256) << 16);
-  pc.b[3] = static_cast<u32>(slot) * kSlotWords;
-  for (int v = 0; v < static_cast<int>(pc.b[1]); ++v) {
-    pc.rect[v][0] = views[v].rect.x; pc.rect[v][1] = views[v].rect.y; pc.rect[v][2] = views[v].rect.w; pc.rect[v][3] = views[v].rect.h;
-    pc.view[v][0] = views[v].screen; pc.view[v][1] = views[v].shown ? 1 : 0; pc.view[v][2] = views[v].blends ? 1 : 0; pc.view[v][3] = views[v].grid ? 1 : 0;
-  }
 
   VkCommandBuffer cb = d.cmd[slot];
   a.vkResetCommandBuffer(cb, 0);
   VkCommandBufferBeginInfo bi{}; bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO; bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   if (a.vkBeginCommandBuffer(cb, &bi) != VK_SUCCESS) { out.end_frame(); return false; }
-  // Every pixel is rewritten here, so UNDEFINED costs no load.
-  VkImageMemoryBarrier ib{}; ib.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-  ib.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT; ib.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; ib.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-  ib.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; ib.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  ib.image = d.bufs[buf].img; ib.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-  a.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &ib);
-  a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, d.pipe);
-  a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, d.layout, 0, 1, &d.bufs[buf].set[slot], 0, nullptr);
-  a.vkCmdPushConstants(cb, d.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
-  a.vkCmdDispatch(cb, (d.w + 15) / 16, (d.h + 7) / 8, 1);
-  // Hand the writes to whoever reads the dma-buf next.
-  VkMemoryBarrier mb{}; mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER; mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-  a.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+  // Cleared to black (the letterbox) in the tile; nothing is loaded.
+  VkClearValue black{};
+  VkRenderPassBeginInfo rb{}; rb.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; rb.renderPass = d.rp; rb.framebuffer = d.bufs[buf].fb;
+  rb.renderArea = {{0, 0}, {d.w, d.h}}; rb.clearValueCount = 1; rb.pClearValues = &black;
+  a.vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
+  const VkViewport vp{0, 0, static_cast<float>(d.w), static_cast<float>(d.h), 0, 1};
+  const VkRect2D sc{{0, 0}, {d.w, d.h}};
+  a.vkCmdSetViewport(cb, 0, 1, &vp);
+  a.vkCmdSetScissor(cb, 0, 1, &sc);
+  a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout, 0, 1, &d.bufs[buf].set[slot], 0, nullptr);
+  Push pc{};
+  pc.a[0] = d.w; pc.a[1] = d.h; pc.a[2] = static_cast<u32>(lw); pc.a[3] = static_cast<u32>(lh);
+  pc.b[0] = static_cast<u32>(rot);
+  const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+  // The views in draw order; a fading inset blends over what is under it.
+  VkPipeline bound = VK_NULL_HANDLE;
+  for (int v = 0; v < std::min(nviews, 2); ++v) {
+    const SDL_Rect& r = views[v].rect;
+    if (!views[v].shown || r.w <= 0 || r.h <= 0) continue;
+    pc.rect[0] = r.x; pc.rect[1] = r.y; pc.rect[2] = r.w; pc.rect[3] = r.h;
+    pc.b[1] = 0;
+    pc.b[2] = static_cast<u32>(slot) * kSlotWords + static_cast<u32>(views[v].screen) * kFrameWords;
+    pc.b[3] = static_cast<u32>(v) | (views[v].grid ? 0x100u : 0u) | (std::min<u32>(grid, 256) << 16);
+    pc.s[0] = 256.0f / static_cast<float>(r.w); pc.s[1] = 192.0f / static_cast<float>(r.h);
+    pc.s[2] = 0.5f / static_cast<float>(r.w);   pc.s[3] = 0.5f / static_cast<float>(r.h);
+    const bool fade = views[v].blends && inset_alpha < 255;
+    if (VkPipeline want = fade ? d.pipe_fade : d.pipe; want != bound) { a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, want); bound = want; }
+    if (fade) { const float k = static_cast<float>(inset_alpha) / 255.0f, bc[4] = {k, k, k, k}; a.vkCmdSetBlendConstants(cb, bc); }
+    a.vkCmdPushConstants(cb, d.layout, stages, 0, sizeof pc, &pc);
+    a.vkCmdDraw(cb, 4, 1, 0, 0);
+  }
+  // The frontend overlay over its drawn rectangle; see Display::blend_row.
+  if (has_over) {
+    const int x0 = std::max(0, drawn.x), y0 = std::max(0, drawn.y), x1 = std::min(lw, drawn.x + drawn.w), y1 = std::min(lh, drawn.y + drawn.h);
+    if (x1 > x0 && y1 > y0) {
+      a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_over);
+      pc.rect[0] = x0; pc.rect[1] = y0; pc.rect[2] = x1 - x0; pc.rect[3] = y1 - y0;
+      pc.b[1] = 1;
+      a.vkCmdPushConstants(cb, d.layout, stages, 0, sizeof pc, &pc);
+      a.vkCmdDraw(cb, 4, 1, 0, 0);
+    }
+  }
+  a.vkCmdEndRenderPass(cb);
   if (a.vkEndCommandBuffer(cb) != VK_SUCCESS) { out.end_frame(); return false; }
   VkSubmitInfo sub{}; sub.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO; sub.commandBufferCount = 1; sub.pCommandBuffers = &cb;
   a.vkResetFences(d.vk->dev, 1, &d.fence[slot]);

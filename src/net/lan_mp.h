@@ -119,7 +119,7 @@ private:
   u32 host_address_ = 0;
   u16 connected_mask_ = 0;
   static constexpr int RECV_TIMEOUT_MS = 25;
-  static constexpr u32 STALE_MS = 64;   // stale-packet window; melonDS uses 16
+  static constexpr u32 STALE_MS = 128;   // stale-packet window; melonDS uses 16
   int last_host_id_ = -1;
   _ENetPeer* last_host_peer_ = nullptr;
   std::queue<_ENetPacket*> rx_;

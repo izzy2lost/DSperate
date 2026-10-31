@@ -46,11 +46,8 @@ struct Vertex {
   u8  oc;              // frustum outcode of pos (bits: +x -x +y -y +z -z)
   s32 sx, sy;          // screen position after viewport transform
   s32 fcol[3];         // final 9-bit colour used by the rasteriser
-  // Screen position with 6 fractional bits, for a raster drawing above the
-  // DS's resolution (Renderer3D::set_gpu_scale): the same transform without
-  // the truncation to whole pixels. (fx >> 6, fy >> 6) is (sx, sy) whenever
-  // the hardware's arithmetic did not wrap; consumers check and fall back.
-  s32 fx, fy;
+  s32 fx, fy;          // sx, sy in 28.4: the GPU raster's sub-pixel position (sx == fx >> 4), so
+                       // a T-junction vertex stays on its neighbour's edge; not hashed, not saved
 };
 
 struct Polygon {

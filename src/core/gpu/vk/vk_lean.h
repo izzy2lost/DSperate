@@ -14,8 +14,12 @@
 // in the stencil (bit 7 drawn, bit 6 shadow mask, bits 0-5 the translucent
 // id), per-pixel shading with fog in the fragment stage, a custom resolve
 // into the 3D layer record, one submit and one fence per frame. No DS
-// edge-row emulation, no per-sample shading, no attribute planes: what the
-// old triangle path paid for (see gpu-raster-todo.md, G0).
+// edge-row emulation of coverage, no per-sample shading, no attribute
+// planes: what the old triangle path paid for (see gpu-raster-todo.md, G0).
+// Attributes, though, are the DS's: the CPU raster's per-row span endpoints
+// come in a table (span_buffer, vk_layout.h) and the fragment stage runs
+// the hardware's fixed-point interpolation along the row, so every texel
+// and vertex colour matches the CPU raster; only coverage is the GPU's.
 namespace ds::gpu::vk {
 
 class Lean {
@@ -41,6 +45,8 @@ public:
   GpuVert* vert_buffer();
   u32*     texel_buffer(u32* capacity);
   GpuPost* post_buffer();
+  // The span table staging (vk_layout.h): DS_MAX_SPAN_ROWS rows of DS_SPAN_WORDS; the frame's row count travels in GpuFrame::nrows.
+  u32*     span_buffer();
 
   // Draw the frame into the next of four output slots; false if refused.
   // Frames are in flight until read: wait() blocks on the newest, output()

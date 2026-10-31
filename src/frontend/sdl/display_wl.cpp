@@ -25,7 +25,7 @@ namespace {
 
 constexpr u32 FMT_XRGB8888 = 0x34325258;   // 'XR24'; core writes 0xAARRGGBB, opaque
 
-// LINEAR: plain row-major (what the CMA heap gives us). INVALID: "derive
+// LINEAR: plain row-major (what the dma-heaps give us). INVALID: "derive
 // layout from the dmabuf". A compositor may accept one and not the other.
 constexpr u64 MOD_LINEAR  = 0;
 constexpr u64 MOD_INVALID = 0x00ffffffffffffffULL;
@@ -232,8 +232,19 @@ bool DmabufOut::open(SDL_Window* win, int w, int h, int output_index) {
   (void)output_index;
 #endif
 
-  for (int i = 0; i < nbufs_; ++i)
-    if (!alloc_buf(bufs_[i])) { close(); return false; }
+  // Short of memory, a ring of two or more still beats losing the tier.
+  nbufs_ = wanted_bufs_;
+  for (int i = 0; i < nbufs_; ++i) {
+    if (alloc_buf(bufs_[i])) continue;
+    drop_buf(bufs_[i]);
+    if (i < 2) { close(); return false; }
+    std::fprintf(stderr, "dmabuf: %d of %d buffers at %dx%d\n", i, wanted_bufs_, w_, h_);
+    nbufs_ = i;
+    break;
+  }
+  if (std::getenv("DS_VERBOSE"))
+    std::fprintf(stderr, "dmabuf: %dx%d, %d buffers (%.1f MiB) from %s\n", w_, h_, nbufs_,
+                 static_cast<double>(w_) * h_ * 4 * nbufs_ / (1u << 20), dmaheap::chosen());
   wl_display_roundtrip_queue(dpy_, q_);   // surface any create_immed error now, not mid-game
 
   // Fullscreen+opaque are two of the three scanout conditions (third is the

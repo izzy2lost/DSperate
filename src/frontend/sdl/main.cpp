@@ -45,6 +45,7 @@
 #include "cpu_gov.h"
 #include "pacer.h"
 #include "present_thread.h"
+#include "rt_budget.h"
 
 #include <dirent.h>
 #include <algorithm>
@@ -67,6 +68,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <optional>
 #include <thread>
 #include <atomic>
 #include <ctime>
@@ -167,8 +169,8 @@ const char* kUsage =
     "                  surface (SDL's window surface) | renderer (SDL_Renderer). One that won't open\n"
     "                  falls back to the renderer. video.sink. --disp / --fbdev are --sink disp / fbdev\n"
     "  --gpu-present / --no-gpu-present  scale and lay out the picture off the CPU, into the\n"
-    "                  scanout buffer: the Rockchip RGA where the device has one, else a Vulkan\n"
-    "                  compute pass (video.gpu_present = true | rga | vulkan | false; on by default)\n"
+    "                  scanout buffer: a Vulkan render pass, else the Rockchip RGA where the\n"
+    "                  device has one (video.gpu_present = true | rga | vulkan | false; on by default)\n"
     "  --preload-rom / --no-preload-rom  read the whole ROM into memory at load, or page it in as\n"
     "                  the game reads it (cart.preload = auto | true | false; auto preloads a ROM on a\n"
     "                  network share that fits in memory, where a page read mid-frame is a round trip)\n"
@@ -235,6 +237,8 @@ const char* kUsage =
 #endif
     "  --autoload      start from the auto slot (emu.autosave's state) when there is one\n"
     "  --no-autoload   ignore it for this run, whatever emu.autoload says\n"
+    "  --saves DIR     battery saves go in DIR (paths.saves; default beside the ROM)\n"
+    "  --states DIR    save states and the auto slot go in DIR (paths.states; default beside the ROM)\n"
     "  --save F        battery save to start from, instead of <rom>.sav\n"
     "                  (a --replay never writes the save back, so a scene repeats)\n"
     "  --clear-cache   delete every unpacked zipped game (the .dsperate directories beside the\n"
@@ -298,6 +302,7 @@ bool aa_on(const std::string& v) {
 void apply_aa(NDS& nds, bool on) { nds.gpu3d.renderer().set_aa(on); }
 
 void load_save(NDS& nds, const std::string& path) {
+  const ds::sdl::OffRealtime off_rt;
   if (!nds.cart) return;
   FILE* f = std::fopen(path.c_str(), "rb");
   if (!f) {
@@ -486,6 +491,7 @@ void read_cheevos_chunk(ds::state::Reader& r) {
 
 
 bool save_state_file(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& layout) {
+  const ds::sdl::OffRealtime off_rt;
   ds::state::Writer w; std::string err;
   if (!nds.save_state(w, err)) { std::fprintf(stderr, "state: cannot save: %s\n", err.c_str()); return false; }
   write_layout_chunk(w, layout);
@@ -507,6 +513,7 @@ std::string g_state_refused;
 // False if unusable, machine untouched; caller must reset if this fails
 // after the load began. `layout` is set only if the state carries one.
 bool load_state_file(NDS& nds, const std::string& path, ds::sdl::Display::Layout& layout, bool& layout_loaded) {
+  const ds::sdl::OffRealtime off_rt;
   layout_loaded = false;
   std::vector<u8> bytes;
   if (FILE* f = std::fopen(path.c_str(), "rb")) {
@@ -797,11 +804,11 @@ struct VideoSetup {
   u32    chunky_thresh = 180 * 256;
   ds::sdl::Display::Layout layout;
   std::vector<ds::sdl::Display::Mode> layout_cycle;
+  bool   gpu_present = false;
+  ds::sdl::Display::GpuPresentMode gpu_mode = ds::sdl::Display::GpuPresentMode::Auto;   // video.gpu_present: true (auto: Vulkan, else RGA) | rga | vulkan
   // Boot-only, see above.
   ds::frontend::Sink panel_sink = ds::frontend::Sink::Count;   // Disp/Fbdev when one owns the panel (frontend/video/select.h)
   ds::frontend::Sink want_sink = ds::frontend::Sink::Count;    // explicit video.sink among the window sinks
-  bool   gpu_present = false;
-  ds::sdl::Display::GpuPresentMode gpu_mode = ds::sdl::Display::GpuPresentMode::Auto;   // video.gpu_present: true (auto: RGA, else Vulkan) | rga | vulkan
   int    upper_display = 0, lower_display = 1;   // dual-window: SDL display per physical panel
 };
 
@@ -836,6 +843,14 @@ bool parse_video(const ds::sdl::Config& cfg, VideoSetup& vs) {
   if (vs.scale < 1) vs.scale = 1;
   vs.fullscreen = cfg.flag("video.fullscreen", false);
   vs.linear = cfg.flag("video.linear", false);
+  // GPU present stage, default on. Display falls back to the scanline scaler
+  // without dma-buf import, and GpuPresent::open() declines without Vulkan.
+  // Read here, not at boot only, so reopening for a menu change keeps it.
+  {
+    const std::string g = cfg.str("video.gpu_present", "true");
+    vs.gpu_mode = g == "rga" ? Disp::GpuPresentMode::Rga : g == "vulkan" ? Disp::GpuPresentMode::Vulkan : Disp::GpuPresentMode::Auto;
+    vs.gpu_present = g == "rga" || g == "vulkan" || g == "true" || g == "auto" || g == "on" || g == "1";
+  }
   vs.vsync = cfg.flag("video.vsync", true);
   vs.dual_window = cfg.flag("video.dual_window", false);
   if (!Disp::parse_int_scale(cfg.str("video.integer_scale", "off"), vs.int_scale)) { std::fprintf(stderr, "integer_scale must be off, under or over\n"); return false; }
@@ -1071,6 +1086,8 @@ static int run(int argc, char** argv) {
     else if (arg("--record")) record = argv[++i];
     else if (arg("--replay")) replay = argv[++i];
     else if (arg("--save")) save_arg = argv[++i];
+    else if (arg("--saves")) cli.set("paths.saves", argv[++i]);
+    else if (arg("--states")) cli.set("paths.states", argv[++i]);
     else if (arg("--load-state")) load_state = argv[++i];
     else if (arg("--autosave-png")) cli.set("emu.autosave_png", argv[++i]);
 #if DSPERATE_CHEEVOS
@@ -1151,7 +1168,7 @@ static int run(int argc, char** argv) {
     // Without a NAND the title goes in the slot (NDS::prepare_dsi_hle).
     if (!dsi_hle) { dsi_title = rom; rom = nullptr; }
   }
-  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.screen_gap", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
+  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "paths.saves", "paths.states", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.screen_gap", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.timing", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "video.gpu3d", "cart.preload", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
@@ -1204,6 +1221,13 @@ static int run(int argc, char** argv) {
     }
     ds::latch_worker_sched();   // what the video workers run at, whichever thread starts them
   }
+  // Latched, the main thread drops back to an ordinary task for the rest of start-up
+  // (rt_budget.h): from here to the first frame it never sleeps, and under the 200 ms
+  // RLIMIT_RTTIME a PipeWire client passes on to the processes it starts (DSlot's shelf is
+  // one), the kernel killed it with a bare SIGKILL between the settings and SDL_Init on a
+  // slow clock. The workers take the latched policy themselves; the guard is lifted, with a
+  // nap, where emulation begins.
+  std::optional<ds::sdl::OffRealtime> startup_off_rt(std::in_place);
   // CPU timing model (core/cpu/timing_mode.h), fixed before anything runs or
   // the recompiler emits its stubs. DS_TIMING wins.
   if (cfg.has("emu.timing") && !std::getenv("DS_TIMING")) ds::g_fast_timing = cfg.str("emu.timing") != "exact";
@@ -1245,9 +1269,16 @@ static int run(int argc, char** argv) {
     std::fprintf(stderr, "net: --internet is not local wireless; pick one\n");
     return 1;
   }
+  // A bad dump fails the run once the panel is open, to say so there (the
+  // substitutes stand in until then).
+  std::string bios_error;
   {
     std::string err;
-    if (!nds.load_bios(bios9, bios7, fw, user, &err)) { std::fprintf(stderr, "bios: %s\n", err.c_str()); return 1; }
+    if (!nds.load_bios(bios9, bios7, fw, user, &err)) {
+      std::fprintf(stderr, "bios: %s\n", err.c_str());
+      bios_error = err;
+      nds.load_bios("", "", "", user);
+    }
     if (!nds.firmware_synthetic) VLOG("firmware: %s\n", fw.c_str());
     // A fixed MAC (dump's own, or generated 00:09:BF:11:22:33) collides
     // across instances and breaks PictoChat. Low 3 bytes generated once,
@@ -1449,20 +1480,17 @@ static int run(int argc, char** argv) {
     chunky = 2;
   }
 
-  // GPU present stage, default on. Display falls back to the scanline scaler
-  // without dma-buf import, and GpuPresent::open() declines without Vulkan.
-  {
-    const std::string g = cfg.str("video.gpu_present", "true");
-    vs.gpu_mode = g == "rga" ? ds::sdl::Display::GpuPresentMode::Rga : g == "vulkan" ? ds::sdl::Display::GpuPresentMode::Vulkan : ds::sdl::Display::GpuPresentMode::Auto;
-    vs.gpu_present = g == "rga" || g == "vulkan" || g == "true" || g == "auto" || g == "on" || g == "1";
-  }
-
   u32 init = SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER;
   if (audio_on || mic_on) init |= SDL_INIT_AUDIO;
   // Prefer SDL's native pipewire backend over Pulse (more daemon/wakeup cost).
   const std::string audio_driver = cfg.str("audio.driver", "pipewire");
   const bool driver_forced = std::getenv("SDL_AUDIODRIVER") != nullptr;
   if ((init & SDL_INIT_AUDIO) && !driver_forced && !audio_driver.empty()) setenv("SDL_AUDIODRIVER", audio_driver.c_str(), 1);
+  // SDL3's atomic KMSDRM path (SDL2 programs run on it through sdl2-compat)
+  // has no plane for a second panel: with a window on each it crashed in the
+  // swap, mid-game or on the way out. The legacy path drives both. Unless the
+  // environment says otherwise; SDL2 itself has no atomic path and ignores it.
+  if (vs.dual_window) setenv("SDL_KMSDRM_ATOMIC", "0", 0);
 #ifdef SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS
   // Pad a/b/x/y are positions (south/east/west/north) everywhere: bindings
   // and the menu's pips assume it. SDL2 otherwise uses labels on Nintendo pads.
@@ -1598,10 +1626,59 @@ sdl_ready:
       nds.gpu.set_scale_target(i, st);
     }
   };
+  // Leaving before the frame loop, once the panels are open: torn down in the
+  // same order as at the end (SDL_Quit with a GL context still up can assert).
+  auto quit_early = [&](int code) {
+    input.close();
+    audio.close();
+    display.close();
+    display2.close();
+    SDL_Quit();
+    return code;
+  };
+  // One frame of a centred notice over the game's screens, dimmed (black
+  // before a game has drawn anything).
+  auto draw_notice_frame = [&](const std::string& title, const char* line2, const char* line3) {
+    const int menu_screen = dual_window ? 0 : display.current_layout().primary;
+    const u32* fb[2];
+    for (int i = 0; i < 2; ++i) {
+      std::memcpy(menu_fb[i].data(), nds.gpu.framebuffer(i), menu_fb[i].size() * 4);
+      ds::sdl::dim_framebuffer(menu_fb[i].data(), static_cast<u32>(menu_fb[i].size()));
+      fb[i] = menu_fb[i].data();
+    }
+    // Drawn on the panel's own pixels where writable, at panel resolution.
+    const bool on_canvas = display.canvas_capable();
+    if (!on_canvas) ds::sdl::draw_notice(ds_canvas(menu_fb[menu_screen].data()), title.c_str(), line2, line3);
+    ds::sdl::Display::Target target[2] = {};
+    if (dual_window) sync_dual_modes(display, display2);
+    bool scaled = display.begin_frame(target);
+    if (dual_window) scaled = display2.begin_frame(target) && scaled;
+    if (scaled) {
+      set_scale_targets(target, true, true);
+      for (int i = 0; i < 2; ++i) nds.gpu.scale_image(i, menu_fb[i].data());
+      // Before the notice: a PiP inset must not land on top of it.
+      display.finish_views();
+      if (dual_window) display2.finish_views();
+      ds::sdl::Display::CanvasView cv;
+      if (on_canvas && display.canvas(cv)) {
+        ds::sdl::draw_notice(ds::sdl::Canvas{cv.px, cv.pitch, cv.w, cv.h}, title.c_str(), line2, line3);
+        // Whole canvas: nothing else redraws the letterbox around it.
+        display.note_canvas_draw_all();
+      }
+      display.present();
+      if (dual_window) display2.present();
+      set_scale_targets(target, false);
+    } else {
+      display.draw(fb);
+      if (dual_window) display2.draw(fb);
+    }
+  };
+  bool rom_cancelled = false;   // the last load_rom_notice was stopped with B
   // Loads a ROM with an "unpacking" notice if it takes more than a moment.
   // Load runs on a worker; this thread pumps events (B/quit cancels) and
   // redraws the notice. Dots advance only on extraction progress.
   auto load_rom_notice = [&](const std::string& path) -> bool {
+    const ds::sdl::OffRealtime off_rt;   // the worker inherits it
     std::atomic<bool> cancel{false}, done{false};
     std::atomic<u64> progress{0};
     bool ok = false;
@@ -1628,51 +1705,49 @@ sdl_ready:
       if (!shown && now - start < 300) { SDL_Delay(10); continue; }   // a loose or cached game never shows it
       if (!shown) display.set_page(true);
       shown = true;
-      const int menu_screen = dual_window ? 0 : display.current_layout().primary;
-      const u32* fb[2];
-      for (int i = 0; i < 2; ++i) {
-        std::memcpy(menu_fb[i].data(), nds.gpu.framebuffer(i), menu_fb[i].size() * 4);
-        ds::sdl::dim_framebuffer(menu_fb[i].data(), static_cast<u32>(menu_fb[i].size()));
-        fb[i] = menu_fb[i].data();
-      }
       char line2[32];
       if (cancel) std::snprintf(line2, sizeof line2, "STOPPING");
       else if (now - last_change > 5000) std::snprintf(line2, sizeof line2, "WAITING ON THE CARD");
       else std::snprintf(line2, sizeof line2, "UNPACKING%.*s", dots, "...");
-      const char* const line3 = "FIRST LAUNCH ONLY    B CANCELS";
-      // Drawn on the panel's own pixels where writable, at panel resolution.
-      const bool on_canvas = display.canvas_capable();
-      if (!on_canvas) ds::sdl::draw_notice(ds_canvas(menu_fb[menu_screen].data()), title.c_str(), line2, line3);
-      ds::sdl::Display::Target target[2] = {};
-      if (dual_window) sync_dual_modes(display, display2);
-      bool scaled = display.begin_frame(target);
-      if (dual_window) scaled = display2.begin_frame(target) && scaled;
-      if (scaled) {
-        set_scale_targets(target, true, true);
-        for (int i = 0; i < 2; ++i) nds.gpu.scale_image(i, menu_fb[i].data());
-        // Before the notice: a PiP inset must not land on top of it.
-        display.finish_views();
-        if (dual_window) display2.finish_views();
-        ds::sdl::Display::CanvasView cv;
-        if (on_canvas && display.canvas(cv)) {
-          ds::sdl::draw_notice(ds::sdl::Canvas{cv.px, cv.pitch, cv.w, cv.h}, title.c_str(), line2, line3);
-          // Whole canvas: nothing else redraws the letterbox around it.
-          display.note_canvas_draw_all();
-        }
-        display.present();
-        if (dual_window) display2.present();
-        set_scale_targets(target, false);
-      } else {
-        display.draw(fb);
-        if (dual_window) display2.draw(fb);
-      }
+      draw_notice_frame(title, line2, "FIRST LAUNCH ONLY    B CANCELS");
       SDL_Delay(50);
     }
     worker.join();
     if (shown) display.set_page(false);
     nds.rom_cancel = nullptr; nds.rom_progress = nullptr; nds.rom_progress_user = nullptr;
-    if (!ok && cancel) VLOG("unpacking cancelled\n");
+    rom_cancelled = !ok && cancel;
+    if (rom_cancelled) VLOG("unpacking cancelled\n");
     return ok;
+  };
+  // A game that cannot start says why on the panel, not only in the log, and
+  // waits for a button (or a minute) before the caller exits: started from a
+  // launcher, the player is back in it knowing what went wrong. `why` is the
+  // panel's short line (19 characters fit); the log has the details.
+  auto start_failed = [&](const std::string& path, const char* why) {
+    std::fprintf(stderr, "launch: %s cannot start: %s\n", path.c_str(), why);
+    if (g_signalled || input.quit()) return;
+    const std::string title = rom_stem(base_name(path));
+    display.set_page(true);
+    const Uint32 start = SDL_GetTicks();
+    while (!g_signalled && !input.quit() && SDL_GetTicks() - start < 60000) {
+      SDL_Event e;
+      while (SDL_PollEvent(&e)) input.handle(e, display, dual_window ? &display2 : nullptr);
+      // Presses in the first half second are the one that launched the game.
+      if (input.take_menu_presses() && SDL_GetTicks() - start > 500) break;
+      draw_notice_frame(title, why, "ANY BUTTON RETURNS");
+      SDL_Delay(50);
+    }
+    display.set_page(false);
+  };
+  // The panel's line for a ROM that would not load, from what the loader said.
+  auto rom_failure = [](const std::string& path, const std::string& err) -> const char* {
+    if (FILE* f = std::fopen(path.c_str(), "rb")) std::fclose(f);
+    else return "FILE CANNOT BE READ";
+    if (err.find("corrupt zip") != std::string::npos || err.find("not a zip") != std::string::npos) return "THE ZIP IS DAMAGED";
+    if (err.find("no .nds") != std::string::npos) return "NO GAME IN THE ZIP";
+    if (err.find("in the archive") != std::string::npos || err.find("the archive is") != std::string::npos ||
+        err.find("compression method") != std::string::npos) return "ZIP NOT SUPPORTED";
+    return "NOT A DS GAME";
   };
   auto discard_session_cache = [&] {
     if (cache_session && !nds.rom_cache_path.empty()) { ds::cart::remove_cached(nds.rom_cache_path); nds.rom_cache_path.clear(); }
@@ -1687,13 +1762,23 @@ sdl_ready:
     if (!nds.load_dsi_nand_title(sc.title_lo, &err)) { std::fprintf(stderr, "dsi: %s: %s\n", path.c_str(), err.c_str()); return false; }
     return true;
   };
+  // From the ROM to the starting state: still off the real-time class (startup_off_rt
+  // above). Inflating a big zipped ROM alone can outlast RLIMIT_RTTIME.
+  if (!bios_error.empty()) {
+    start_failed(rom_path, bios_error.find("firmware") != std::string::npos ? "FIRMWARE IS BAD" : "DS BIOS IS BAD");
+    return quit_early(1);
+  }
   if (dsi_hle && rom_shortcut) {
-    if (!load_shortcut_title(rom_path)) { SDL_Quit(); return 1; }
+    if (!load_shortcut_title(rom_path)) { return quit_early(1); }
   } else if (dsi_hle && rom_is_cia) {
     std::vector<ds::u8> srl;
     std::string err;
-    if (!ds::io::read_dsiware(rom_path, srl, &err) || !nds.load_rom_image(std::move(srl))) { std::fprintf(stderr, "dsi: %s: %s\n", rom_path.c_str(), err.c_str()); SDL_Quit(); return 1; }
-  } else if (!boot_firmware && !load_rom_notice(rom_path)) { std::fprintf(stderr, "could not read %s\n", rom_path.c_str()); SDL_Quit(); return 1; }
+    if (!ds::io::read_dsiware(rom_path, srl, &err) || !nds.load_rom_image(std::move(srl))) { std::fprintf(stderr, "dsi: %s: %s\n", rom_path.c_str(), err.c_str()); return quit_early(1); }
+  } else if (!boot_firmware && !load_rom_notice(rom_path)) {
+    std::fprintf(stderr, "could not read %s\n", rom_path.c_str());
+    if (!rom_cancelled) start_failed(rom_path, rom_failure(rom_path, nds.rom_error));
+    return quit_early(1);
+  }
   auto prepare_dsiware = [&]() -> bool {
     std::string err;
     std::vector<std::string> made;
@@ -1706,7 +1791,7 @@ sdl_ready:
     for (const std::string& m : made) std::fprintf(stderr, "dsi: %s\n", m.c_str());
     return true;
   };
-  if (dsi_hle && !prepare_dsiware()) { SDL_Quit(); return 1; }
+  if (dsi_hle && !prepare_dsiware()) { return quit_early(1); }
   // Firmware boot: BootMenu.nds beside the config wins if present, else a
   // built-in loader cart is assembled in memory. Not while autoloading DSiWare.
   if (boot_firmware && (!dsi_mode || (!dsi_hle && (!dsi_title || dsi_menu)))) {
@@ -1739,7 +1824,7 @@ sdl_ready:
   else VLOG("rtc: frozen for the replay\n");
   if (replay && rtc_host) std::fprintf(stderr, "rtc: --rtc-host over a replay; this run is not reproducible\n");
 #if DSPERATE_JIT
-  if (jit && !ds::jit::attach(nds, true, true)) return 1;
+  if (jit && !ds::jit::attach(nds, true, true)) return quit_early(1);
   // The DS menu boots under per-instruction budget checks: block-granularity
   // overshoot can intermittently stop it booting. Dropped once a game
   // launches; not the DSi Menu, which runs fine without it.
@@ -1753,10 +1838,10 @@ sdl_ready:
   if (save_readonly) VLOG("save: read-only for the replay\n");
 
   ds::input::Log log;
-  if (record && replay) { std::fprintf(stderr, "--record and --replay are exclusive\n"); return 2; }
-  if (record && !log.open_write(record)) { std::fprintf(stderr, "cannot write %s\n", record); return 1; }
+  if (record && replay) { std::fprintf(stderr, "--record and --replay are exclusive\n"); return quit_early(2); }
+  if (record && !log.open_write(record)) { std::fprintf(stderr, "cannot write %s\n", record); return quit_early(1); }
   if (replay) {
-    if (!log.open_read(replay)) { std::fprintf(stderr, "cannot read %s\n", replay); return 1; }
+    if (!log.open_read(replay)) { std::fprintf(stderr, "cannot read %s\n", replay); return quit_early(1); }
     VLOG("replay: %u frames from %s\n", log.frames(), replay);
   }
   // After the battery save (state's SRAM wins) and after the replay log
@@ -1770,7 +1855,7 @@ sdl_ready:
     bool got_layout = false;
     // Unreadable --load-state fails the run; an unreadable auto state just boots normally.
     if (!load_state_file(nds, start_state, layout, got_layout)) {
-      if (load_state) return 1;
+      if (load_state) { start_failed(rom_path, "STATE NOT LOADED"); return quit_early(1); }
     } else {
       if (!load_state) std::fprintf(stderr, "state: autoloaded %s\n", start_state);
       // The state's view replaces the config's, dual-window aside.
@@ -1778,6 +1863,7 @@ sdl_ready:
       if (log.reading()) { ds::input::Frame f; for (u64 k = 0; k < nds.frame_count && log.read(f); ++k) {} }
     }
   }
+  startup_off_rt.reset();
   ds::sdl::Lid lid;
   if (!replay) lid.open();
   std::vector<s16> mic, mic_raw, mic_queue;
@@ -1918,6 +2004,7 @@ sdl_ready:
   bool ff_toggle = cfg.flag("emu.fast_forward", false);
   int ff_speed = cfg.num("emu.ff_speed", 0), ff_skip = cfg.num("emu.ff_skip", 3);
   bool was_fast = false;
+  ds::sdl::RtBudget rt_budget;   // RLIMIT_RTTIME (rt_budget.h)
   int ff_since = 0;           // frames since the last present, for fast forward's ff_skip
   std::vector<u32> cursor_fb(ds::SCREEN_W * ds::SCREEN_H);   // bottom screen with the pen crosshair
   std::vector<u32> osd_fb(ds::SCREEN_W * ds::SCREEN_H);      // primary screen with the slot digit / FPS counter
@@ -2410,7 +2497,7 @@ sdl_ready:
         if (net_live && *net_live) return "NOT DURING A NETWORK SESSION";
         return cfg.num("emu.frameskip", 0) > 0 ? "" : "ONLY WITH FRAMESKIP ON";
       case ds::sdl::Dep::PanelEffects:
-        if (display.rga_present()) return "THE RGA ALWAYS SCALES BILINEAR";
+        if (display.rga_present()) return "";   // off: exact at whole-number scales, bilinear between
         return panel_effects() ? "" : "THIS SCREEN SCALES IN HARDWARE";
       case ds::sdl::Dep::GridSeam:
         if (display.rga_present()) return std::strcmp(s.key, "video.seam") == 0 ? "THE RGA DRAWS THE DARK GRID ONLY" : "";
@@ -2498,6 +2585,7 @@ sdl_ready:
   host.apply = [&](const char* key, const std::string& v) {
     const auto is = [&](const char* k) { return std::strcmp(key, k) == 0; };
     const bool on = v == "1" || v == "true" || v == "yes" || v == "on";
+    if (is("pad.stylus_speed")) { host.reconfigure_input(); return; }
     if (is("emu.frameskip")) { if (!net_live) fs_limit = std::atoi(v.c_str()); return; }
     if (is("emu.frameskip_mode")) { fs_adaptive = v != "fixed"; return; }
     if (is("emu.dsi_nand_shortcuts")) {
@@ -2987,6 +3075,7 @@ sdl_ready:
   // does the same from a script).
   bool from_list = false;   // the game running was picked from the list: RESET goes back to the firmware
   auto launch_game = [&](const std::string& pick) {
+    const ds::sdl::OffRealtime off_rt;   // reset, ROM, save and state: one-shot work
     VLOG("launcher: %s\n", pick.c_str());
     // DSiWare runs with the launcher hand-off and a made-up NAND; no way
     // back to the DS menu, the session ends when the title does.
@@ -3384,7 +3473,12 @@ sdl_ready:
       ds::input::apply(nds, in);
     } else {
       bool closed;
-      if (lid.poll(closed)) { input.set_lid(closed); if (closed) flush_save(); }
+      if (lid.poll(closed)) {
+        // The guest wakes to the host's time: emulated time stood still while the host slept.
+        if (!closed) nds.io.resync_rtc_clock();
+        input.set_lid(closed);
+        if (closed) flush_save();
+      }
       in.lid = input.lid();
       if (input.fake_mic()) input.fake_mic_frame(mic);
       else {
@@ -3435,6 +3529,7 @@ sdl_ready:
       if (!said) { said = true; std::fprintf(stderr, "fast forward: not during a network session\n"); }
       fast = false;
     }
+    rt_budget.set_unpaced(fast || limiter_off, verbose());
     if (fast != was_fast) {
       was_fast = fast;
       pacer.reset();
@@ -3881,6 +3976,7 @@ sdl_ready:
       }
     }
     ++frames;
+    rt_budget.nap();
     // DS_SHOT_AT=N: a screenshot after frame N, for offscreen/replay runs.
     if (static const long shot_at = [] { const char* v = std::getenv("DS_SHOT_AT"); return v ? std::atol(v) : -1L; }(); shot_at >= 0 && frames == static_cast<u64>(shot_at)) shot_pending = true;
     // DS_LAUNCH_AT=<frame>:<path>: start that game at that frame, as the picker would.
@@ -3992,6 +4088,15 @@ sdl_ready:
 // RESET from a game the list started goes back via re-exec: launch_game is
 // a one-way trip (a DSiWare pick swaps BIOS pair, firmware, NAND, machine).
 int main(int argc, char** argv) {
+#if defined(__linux__)
+  // A crash's core without the guest memory's shared mappings (bit 1 of the
+  // default 0x33): fastmem lays guest pages into its views as MAP_SHARED
+  // mappings of one memfd, some mirrored thousands of times, and each mapping
+  // went into the core again -- systemd-coredump took 92 s over one on the
+  // RG DS+, the game frozen on screen meanwhile. The heap and the stacks a
+  // backtrace needs stay in.
+  if (FILE* f = std::fopen("/proc/self/coredump_filter", "w")) { std::fputs("0x31", f); std::fclose(f); }
+#endif
   const int rc = run(argc, argv);
   if (g_restart && rc == 0) {
     execv("/proc/self/exe", argv);

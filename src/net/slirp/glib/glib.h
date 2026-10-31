@@ -112,8 +112,10 @@ typedef gchar **GStrv;
 #define G_BYTE_ORDER G_LITTLE_ENDIAN
 #endif
 
-/* stream.c's (state save) big-endian accessors. GCC lets the undeclared
- * calls through as implicit declarations; clang (the Android NDK) refuses. */
+/* stream.c (the state save/load streams) converts with these. Missing, GCC
+ * 13 and older warn of an implicit declaration and the link never notices,
+ * since nothing pulls stream.o in; GCC 14 made that an error, and clang
+ * (the Android NDK) refuses too. */
 #if G_BYTE_ORDER == G_BIG_ENDIAN
 #define GUINT16_TO_BE(v) ((guint16)(v))
 #define GUINT32_TO_BE(v) ((guint32)(v))
@@ -121,10 +123,10 @@ typedef gchar **GStrv;
 #define GUINT16_TO_BE(v) ((guint16)__builtin_bswap16((guint16)(v)))
 #define GUINT32_TO_BE(v) ((guint32)__builtin_bswap32((guint32)(v)))
 #endif
+#define GINT16_TO_BE(v) ((gint16)GUINT16_TO_BE(v))
+#define GINT32_TO_BE(v) ((gint32)GUINT32_TO_BE(v))
 #define GUINT16_FROM_BE(v) GUINT16_TO_BE(v)
 #define GUINT32_FROM_BE(v) GUINT32_TO_BE(v)
-#define GINT16_TO_BE(v) ((gint16)GUINT16_TO_BE((guint16)(v)))
-#define GINT32_TO_BE(v) ((gint32)GUINT32_TO_BE((guint32)(v)))
 #define GINT16_FROM_BE(v) GINT16_TO_BE(v)
 #define GINT32_FROM_BE(v) GINT32_TO_BE(v)
 

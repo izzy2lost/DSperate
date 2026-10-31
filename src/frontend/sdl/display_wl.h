@@ -2,7 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
 // Dmabuf presentation onto SDL's own Wayland window: frames render straight
-// into CMA dma-heap buffers submitted via zwp_linux_dmabuf_v1, avoiding the
+// into dma-heap buffers submitted via zwp_linux_dmabuf_v1, avoiding the
 // shm copy and texture upload of SDL's window surface path. The compositor
 // samples zero-copy, or (fullscreen/opaque/untransformed) scans out directly.
 //
@@ -50,8 +50,8 @@ public:
   int width() const override { return w_; }
   int height() const override { return h_; }
   int bufs() const override { return nbufs_; }
-  // Before open(): how many buffers to rotate, up to BUFS.
-  void set_bufs(int n) { nbufs_ = n < 2 ? 2 : n > BUFS ? BUFS : n; }
+  // Before open(): how many buffers to rotate, up to BUFS (open() settles for 2+ if memory is short).
+  void set_bufs(int n) { wanted_bufs_ = n < 2 ? 2 : n > BUFS ? BUFS : n; }
   int current() const override { return cur_; }
 
   // Pixels of a free buffer (blocks on the compositor if all pending: vsync).
@@ -80,6 +80,7 @@ private:
   struct wl_event_queue* q_ = nullptr;
   Buf bufs_[BUFS];
   int nbufs_ = DEFAULT_BUFS;
+  int wanted_bufs_ = DEFAULT_BUFS;
   bool gpu_writes_ = false;
   int cur_ = -1;
   int w_ = 0, h_ = 0;

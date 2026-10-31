@@ -131,6 +131,7 @@ double Display::dominant_ratio() const {
 bool Display::open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, const Layout& layout_mode, int only_screen, int display_index) {
   sync();
   layout_ = layout_mode;
+  linear_ = linear;
   only_screen_ = only_screen;
   upper_panel_ = only_screen == 0;
   display_index_ = display_index;
@@ -233,7 +234,7 @@ bool Display::open_kms(int rot) {
   return true;
 }
 
-// The scanline path's pixels in a CMA dma-buf instead of the shm surface.
+// The scanline path's pixels in a dma-buf instead of the shm surface.
 // Needs the window surface first (the size it's configured at), and falls
 // back to it if the dma-buf is lost later.
 bool Display::open_dmabuf(int rot) {
@@ -340,11 +341,13 @@ void Display::layout() {
 bool Display::try_gpu_present() {
   if (!gpu_wanted_ || !out_) return false;
   std::string why;
-  if (gpu_mode_ != GpuPresentMode::Vulkan) gpu_ = open_rga_presenter(*out_, &why);
-  if (!gpu_ && gpu_mode_ != GpuPresentMode::Rga) {
+  // Auto: Vulkan first (a render pass into the scanout buffer beats the
+  // RGA's ~1.1 GB/s, even beside the GPU 3D layer), the RGA where it fails.
+  if (gpu_mode_ != GpuPresentMode::Rga) gpu_ = open_vk_import_presenter(*out_, &why);
+  if (!gpu_ && gpu_mode_ != GpuPresentMode::Vulkan) {
     std::string why2;
-    gpu_ = open_vk_import_presenter(*out_, &why2);
-    if (!gpu_) why = gpu_mode_ == GpuPresentMode::Vulkan ? why2 : why + "; " + why2;
+    gpu_ = open_rga_presenter(*out_, &why2);
+    if (!gpu_) why = gpu_mode_ == GpuPresentMode::Rga ? why2 : why + "; " + why2;
   }
   if (!gpu_) { std::fprintf(stderr, "video.gpu_present: %s; scanline scaling instead\n", why.c_str()); return false; }
   scaled_ = false;
@@ -410,7 +413,7 @@ bool Display::prepare_gpu(GpuFrame& f) {
   out_size(p.lw, p.lh);
   for (int i = 0; i < nviews_; ++i) f.v[i] = FramePresenter::View{views_[i].screen, views_[i].rect, views_[i].shown, !views_[i].direct, grid_on(views_[i].screen)};
   f.n = nviews_;
-  p.rot = rot_; p.inset_alpha = inset_alpha_;
+  p.rot = rot_; p.inset_alpha = inset_alpha_; p.linear = linear_;
   p.drawn = frontend::Rect{canvas_drawn_.x, canvas_drawn_.y, canvas_drawn_.w, canvas_drawn_.h};
   p.grid = grid_strength_ > 0.0 ? static_cast<u32>(std::lround((1.0 - grid_strength_) * 256.0)) : 256u;
   canvas_drawn_ = SDL_Rect{0, 0, 0, 0};

@@ -2,9 +2,10 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
 // GPU present stage: the scanout tier's CMA buffers are imported into Vulkan
-// as LINEAR images, and one compute dispatch per frame lays out, scales,
-// rotates and blends the core's two 256x192 frames straight into the buffer
-// the tier presents, replacing the CPU scanline scaler.
+// as LINEAR images, and one render pass per frame lays out, scales, rotates
+// and blends the core's two 256x192 frames straight into the buffer the tier
+// presents (a quad per view, the overlay over its rectangle, the letterbox
+// the pass's clear), replacing the CPU scanline scaler.
 //
 // Frames are pipelined one deep: present() submits frame N and returns; the
 // fence wait and tier end_frame() happen at the start of frame N+1 (or in
@@ -32,7 +33,7 @@ public:
   bool reimport(ScanoutOut& out);
 
   struct View { int screen; SDL_Rect rect; bool shown; bool blends; bool grid = false; };   // grid: LCD grid applies to this view
-  // One frame: take a buffer from the tier, upload fb[0..1], dispatch,
+  // One frame: take a buffer from the tier, upload fb[0..1], draw,
   // submit. `lw`x`lh` is the logical (unrotated) frame the rects are laid
   // out in; `rot` maps it onto the presented buffer. False if nothing shown.
   // `drawn`: rectangle the frontend's overlay drew this frame (see overlay()).

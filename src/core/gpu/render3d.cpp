@@ -717,10 +717,14 @@ void Renderer3D::rewind_edge(Edge& e) {
 }
 
 void Renderer3D::setup_polygon(Edge& e, const Polygon& p) {
+  setup_shade(e.sh, p);
+  init_edges(e, p);
+}
+
+void Renderer3D::init_edges(Edge& e, const Polygon& p) {
   const u32 n = p.nverts;
   u32 vtop = p.vtop, vbot = p.vbot;
   e.poly = &p;
-  setup_shade(e.sh, p);
   e.cur_vl = vtop; e.cur_vr = vtop;
   if (p.facing) {
     e.next_vl = e.cur_vl + 1; if (e.next_vl >= n) e.next_vl = 0;
@@ -2644,7 +2648,7 @@ void Renderer3D::gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npol
     if (first_ordered == ~0u && (alpha_all_fail || p.translucent || p.shadow_mask || p.shadow)) { first_ordered = static_cast<u32>(gp.size()); opaque_rows = nrows; }
     GpuPoly o{};
     o.first_vert = static_cast<u32>(gv.size()); o.nverts = p.nverts; o.attr = p.attr; o.texparam = p.texparam;
-    o.ytop = p.ytop; o.ybot = p.ybot; o.vtop = p.vtop; o.vbot = p.vbot;
+    o.ytop = p.ytop; o.ybot = p.ybot; o.span_base = DS_SPAN_NONE; o.vbot = p.vbot;
     o.flags = (p.translucent ? DS_PF_TRANSLUCENT : 0u) | (p.wbuffer ? DS_PF_WBUFFER : 0u) | (p.facing ? DS_PF_FRONTFACING : 0u) |
               (p.shadow_mask ? DS_PF_SHADOW_MASK : 0u) | (p.shadow ? DS_PF_SHADOW : 0u);
     std::vector<u32> run(DS_SHRUN_LINES, 0);
@@ -2656,7 +2660,7 @@ void Renderer3D::gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npol
     s32 xmin = 0x7FFFFFFF, xmax = -0x7FFFFFFF;
     for (u32 j = 0; j < p.nverts; ++j) {
       const Vertex& v = gx.vertex(p.vtx[j]);
-      GpuVert d{}; d.sx = v.sx; d.sy = v.sy; d.fx = v.sx << 6; d.fy = v.sy << 6; d.z = p.z[j]; d.w = p.w[j]; d.r = v.fcol[0]; d.g = v.fcol[1]; d.b = v.fcol[2]; d.s = v.tex[0]; d.t = v.tex[1];
+      GpuVert d{}; d.sx = v.sx; d.sy = v.sy; d.z = p.z[j]; d.w = p.w[j]; d.r = v.fcol[0]; d.g = v.fcol[1]; d.b = v.fcol[2]; d.s = v.tex[0]; d.t = v.tex[1]; d.fx = v.fx; d.fy = v.fy;
       gv.push_back(d);
       xmin = std::min(xmin, d.sx); xmax = std::max(xmax, d.sx);
     }
@@ -3026,6 +3030,62 @@ namespace {
 inline double now_ms() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 }
 
+u32 Renderer3D::gpu_span_rows(const Polygon& p, u32* out, u32 cap) {
+  using namespace ds::gpu::vk;
+  const s32 ry0 = std::max(p.ytop, 0), ry1 = std::min(p.ybot, 191);
+  if (ry1 < ry0) return 0;
+  const u32 h = static_cast<u32>(ry1 - ry0) + 1;
+  if (h > cap) return 0;
+  Edge e{};
+  init_edges(e, p);
+  const bool flat = p.ytop == p.ybot;
+  // The same per-line walk as precompute_lines, endpoints only: the edge
+  // cursors advance from ytop, rows above the screen are walked, not stored.
+  const s32 ylast = flat ? p.ytop : p.ybot - 1;
+  u32* last = nullptr;
+  for (s32 y = p.ytop; y <= ylast && y <= ry1; ++y) {
+    if (!flat) {
+      if (y >= gx_->vertex(p.vtx[e.next_vl]).sy && e.cur_vl != p.vbot) setup_left_edge(e, y);
+      if (y >= gx_->vertex(p.vtx[e.next_vr]).sy && e.cur_vr != p.vbot) setup_right_edge(e, y);
+    }
+    s32 xstart = e.xl, xend = e.xr;
+    s32 wl, wr, av[2][5];
+    {
+      wl = e.left.interp.interpolate(e.wcl, e.wnl);
+      const Interp<1>& in = e.left.interp; const Vertex& vc = *e.vcl; const Vertex& vn = *e.vnl;
+      for (int k = 0; k < 3; ++k) av[0][k] = in.interpolate(vc.fcol[k], vn.fcol[k]);
+      av[0][3] = in.interpolate(vc.tex[0], vn.tex[0]); av[0][4] = in.interpolate(vc.tex[1], vn.tex[1]);
+    }
+    {
+      wr = e.right.interp.interpolate(e.wcr, e.wnr);
+      const Interp<1>& in = e.right.interp; const Vertex& vc = *e.vcr; const Vertex& vn = *e.vnr;
+      for (int k = 0; k < 3; ++k) av[1][k] = in.interpolate(vc.fcol[k], vn.fcol[k]);
+      av[1][3] = in.interpolate(vc.tex[0], vn.tex[0]); av[1][4] = in.interpolate(vc.tex[1], vn.tex[1]);
+    }
+    if (e.r_incr0 && (!e.l_incr0 || xstart != xend) && xend != 0) --xend;
+    int astart = 0;
+    if (xstart > xend) { astart = 1; std::swap(xstart, xend); std::swap(wl, wr); }
+    if (y >= ry0) {
+      u32* o = out + DS_SPAN_WORDS * static_cast<u32>(y - ry0);
+      const s32* al = av[astart]; const s32* ar = av[1 - astart];
+      auto rgb = [](const s32* a) { return (static_cast<u32>(a[0]) & 0x3FF) | ((static_cast<u32>(a[1]) & 0x3FF) << 10) | ((static_cast<u32>(a[2]) & 0x3FF) << 20); };
+      auto st = [](const s32* a) { return (static_cast<u32>(a[3]) & 0xFFFF) | (static_cast<u32>(a[4]) << 16); };
+      o[0] = static_cast<u32>(xstart); o[1] = static_cast<u32>(xend); o[2] = static_cast<u32>(wl); o[3] = static_cast<u32>(wr);
+      o[4] = rgb(al); o[5] = st(al); o[6] = rgb(ar); o[7] = st(ar);
+      last = o;
+    }
+    e.xl = e.left.step();
+    e.xr = e.right.step();
+  }
+  // Row ybot (a fragment the GPU's coverage reaches below the DS's last line): the last line's values.
+  if (!flat && ry1 == p.ybot) {
+    u32* o = out + DS_SPAN_WORDS * (h - 1);
+    if (last && last != o) std::memcpy(o, last, sizeof(u32) * DS_SPAN_WORDS);
+    else if (!last) std::memset(o, 0, sizeof(u32) * DS_SPAN_WORDS);
+  }
+  return h;
+}
+
 bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 npoly) {
   using namespace ds::gpu::vk;
   const double t0 = g_gpu_trace.on ? now_ms() : 0;
@@ -3035,6 +3095,8 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
   GpuVert* const gv = lean_->vert_buffer();
   u32 texcap = 0; u32* const tex = lean_->texel_buffer(&texcap);
   GpuPost* const ps = lean_->post_buffer();
+  u32* const spans = lean_->span_buffer();
+  static const bool no_span = std::getenv("DS_LEAN_NOSPAN") && std::atoi(std::getenv("DS_LEAN_NOSPAN")) != 0;   // DS_LEAN_NOSPAN=1: no span table, the GPU's own interpolation (measurement)
   u32 np = 0, nv = 0, nrows = 0, first_ordered = ~0u, opaque_rows = 0;
   const bool alpha_all_fail = rs_->alpha_ref >= 31;
   for (u32 i = 0; i < npoly; ++i) {
@@ -3045,25 +3107,21 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
     GpuPoly& o = gp[np];
     o = GpuPoly{};
     o.first_vert = nv; o.nverts = p.nverts; o.attr = p.attr; o.texparam = p.texparam;
-    o.ytop = p.ytop; o.ybot = p.ybot; o.vtop = p.vtop; o.vbot = p.vbot;
+    o.ytop = p.ytop; o.ybot = p.ybot; o.span_base = DS_SPAN_NONE; o.vbot = p.vbot;
     o.flags = (p.translucent ? DS_PF_TRANSLUCENT : 0u) | (p.wbuffer ? DS_PF_WBUFFER : 0u) | (p.facing ? DS_PF_FRONTFACING : 0u) |
               (p.shadow_mask ? DS_PF_SHADOW_MASK : 0u) | (p.shadow ? DS_PF_SHADOW : 0u);
     s32 xmin = 0x7FFFFFFF, xmax = -0x7FFFFFFF;
     for (u32 j = 0; j < p.nverts; ++j) {
       const Vertex& v = gx.vertex(p.vtx[j]);
       GpuVert& d = gv[nv + j];
-      d.sx = v.sx; d.sy = v.sy; d.z = p.z[j]; d.w = p.w[j]; d.r = v.fcol[0]; d.g = v.fcol[1]; d.b = v.fcol[2]; d.s = v.tex[0]; d.t = v.tex[1];
-      // The sub-pixel position, if it agrees with the whole-pixel one (a
-      // state load leaves it stale until the vertex is transformed again).
-      const bool frac_ok = (v.fx >> 6) == v.sx && (v.fy >> 6) == v.sy;
-      d.fx = frac_ok ? v.fx : v.sx << 6; d.fy = frac_ok ? v.fy : v.sy << 6;
+      d.sx = v.sx; d.sy = v.sy; d.z = p.z[j]; d.w = p.w[j]; d.r = v.fcol[0]; d.g = v.fcol[1]; d.b = v.fcol[2]; d.s = v.tex[0]; d.t = v.tex[1]; d.fx = v.fx; d.fy = v.fy;
       d.pad_ = 0;
       xmin = std::min(xmin, d.sx); xmax = std::max(xmax, d.sx);
     }
     o.xmin = xmin; o.xmax = xmax;
     nv += p.nverts;
-    const s32 ry0 = p.ytop < 0 ? 0 : p.ytop, ry1 = p.ybot > 191 ? 191 : p.ybot;
-    nrows += ry1 >= ry0 ? static_cast<u32>(ry1 - ry0) + 1 : 0;
+    // The span table rows (vk_layout.h): the CPU raster's own row endpoints.
+    if (!no_span) if (const u32 h = gpu_span_rows(p, spans + DS_SPAN_WORDS * nrows, DS_MAX_SPAN_ROWS - nrows)) { o.span_base = nrows; nrows += h; }
     const u32 fmt = (p.texparam >> 26) & 7;
     if ((dispcnt_ & 1) && fmt != 0) {
       Shade sh; texture_fields(sh, p);
@@ -3093,6 +3151,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
   f.first_ordered = first_ordered; f.opaque_rows = opaque_rows; f.nrows = nrows;
   if (gpu_tex_filter_) f.flags2 |= DS_FF2_TEXFILTER;
   for (u32 i = 0; i < npoly; ++i) if (!polys[i]->degenerate) { if (polys[i]->wbuffer) f.flags |= DS_FF_WBUFFER; break; }
+  if (lean_->msaa()) f.flags2 |= DS_FF2_MSAA;   // vertices on pixel corners (lean.vert)
   {
     const u16 c = static_cast<u16>(rs_->clear_attr1);
     auto ch = [](u16 v, u32 shift) { u32 x = (shift == 0 ? (v << 1) : (v >> shift)) & 0x3E; return x ? x + 1 : x; };

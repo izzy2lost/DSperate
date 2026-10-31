@@ -55,7 +55,7 @@ struct GpuVert {
   DS_INT z, w;          // depth and normalised W for this polygon's slot
   DS_INT r, g, b;       // 9-bit vertex colour; the raster narrows to 6 with >> 3
   DS_INT s, t;          // 12.4 texture coordinates
-  DS_INT fx, fy;        // screen position with 6 fractional bits (drawn from above 1x)
+  DS_INT fx, fy;        // screen position in 28.4 (sx == fx >> 4): the lean path draws here
   uint   pad_;
 };
 
@@ -69,10 +69,11 @@ struct GpuPoly {
   uint   tex_w, tex_h;  // decoded texture dimensions, texels
   uint   flags;         // DS_PF_*
   DS_INT ytop, ybot;    // screen scanline range, inclusive
-  uint   vtop, vbot;    // slots of the top and bottom vertices: where the edge chains start and end
+  uint   span_base;     // first row of this polygon in the span table (gpu_span_rows), DS_SPAN_NONE for none
+  uint   vbot;          // slot of the bottom vertex (unused by the lean path)
   DS_INT xmin, xmax;    // screen x bounds, for the binning pass
-  uint   row_base;      // this polygon's first row in the span table
-  uint   pad_;
+  uint   row_base;      // lean path: the polygon's s range, min | max << 16, each + 32768 (the fragment stage's clamp)
+  uint   pad_;          // lean path: the t range, likewise
 };
 
 // One scanline of one polygon (the Y stage's output), computed once per
@@ -97,6 +98,21 @@ struct GpuRow {
 // Span table rows a frame needs (sum of polygons' clamped heights); refused,
 // not truncated, if it wants more. Worst case 2048*192 falls back to the CPU.
 #define DS_MAX_SPAN_ROWS 49152
+
+// The lean path's span table: the CPU raster's own per-row span endpoints
+// (Renderer3D::gpu_span_rows walks the polygon's edges with its Slope and
+// Interp code), so the fragment stage can interpolate colour and texcoords
+// along the row exactly as the hardware does and the GPU raster's texels
+// match the CPU raster's. Per row of a polygon's [max(ytop, 0),
+// min(ybot, 191)], from GpuPoly::span_base, DS_SPAN_WORDS words:
+//   0 xstart  1 xend (inclusive, the right-edge push applied)  2 wl  3 wr
+//   4 left r | g << 10 | b << 20 (9-bit)   5 left s | t << 16 (12.4, s16)
+//   6 right rgb                            7 right st
+// DS_SPAN_NONE marks a polygon without rows (a frame over DS_MAX_SPAN_ROWS,
+// or a recorded dump): the stage falls back to the hardware's interpolation.
+#define DS_SPAN_WORDS 8
+#define DS_SPAN_NONE 0xFFFFFFFFu
+#define DS_SPAN_TABLE_WORDS (DS_SPAN_WORDS * DS_MAX_SPAN_ROWS)
 
 // Per-frame constants; pushed, not a buffer (changes every frame, small).
 struct GpuFrame {

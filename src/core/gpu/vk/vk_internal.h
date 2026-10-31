@@ -54,7 +54,7 @@ namespace ds::gpu::vk {
   F(vkGetPhysicalDeviceSurfaceFormatsKHR) F(vkGetPhysicalDeviceSurfacePresentModesKHR) F(vkDestroySurfaceKHR) \
   F(vkCreateSwapchainKHR) F(vkDestroySwapchainKHR) F(vkGetSwapchainImagesKHR) F(vkAcquireNextImageKHR) F(vkQueuePresentKHR) \
   F(vkCreateSemaphore) F(vkDestroySemaphore) F(vkCmdCopyBufferToImage) F(vkCreateSampler) F(vkDestroySampler) \
-  F(vkCmdSetViewport) F(vkCmdSetScissor) F(vkQueueWaitIdle) F(vkCmdCopyImage) F(vkCmdClearColorImage)
+  F(vkCmdSetViewport) F(vkCmdSetScissor) F(vkQueueWaitIdle) F(vkCmdCopyImage) F(vkCmdClearColorImage) F(vkCmdBlitImage) F(vkCmdSetBlendConstants)
 
 #define DS_VK_FNS DS_VK_FNS_CORE DS_VK_FNS_PIPE DS_VK_FNS_WSI
 

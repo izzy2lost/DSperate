@@ -309,6 +309,7 @@ bool NDS::load_rom_fd(int fd, const std::string& path) {
   const bool zipped = pread(fd, magic, 4, 0) == 4 && cart::is_zip(magic, 4);
   rom_zip_entry.clear();
   rom_cache_path.clear();
+  rom_error.clear();
   // A loose .nds is mapped and a zip goes through the cache beside it
   // (cart/zip_cache.h).
   std::string err;
@@ -327,6 +328,7 @@ bool NDS::load_rom_fd(int fd, const std::string& path) {
   }
   if (src) return load_rom_source(std::move(src));
   std::fprintf(stderr, "rom: %s: %s\n", path.c_str(), err.c_str());
+  rom_error = err;
   if (err.compare(0, 6, "mmap: ") != 0) return false;
   // A filesystem that can't map: read (and unzip) the whole ROM into memory.
   std::fprintf(stderr, "rom: loading into memory instead\n");
@@ -341,6 +343,7 @@ bool NDS::load_rom_fd(int fd, const std::string& path) {
     std::string chosen;
     if (!cart::extract_rom(image.data(), image.size(), rom, err, &chosen)) {
       std::fprintf(stderr, "rom: %s: %s\n", path.c_str(), err.c_str());
+      rom_error = err;
       return false;
     }
     rom_zip_entry = std::move(chosen);
@@ -355,7 +358,8 @@ bool NDS::load_rom_image(std::vector<u8> image) {
 }
 
 bool NDS::load_rom_source(std::unique_ptr<cart::RomSource> src) {
-  if (!src || src->size() < 0x1000) return false;
+  if (!src || src->size() < 0x1000) { rom_error = "too small for a DS card"; return false; }
+  rom_error.clear();
   rom_id = rom_identity(*src);
   cart = std::make_unique<cart::Cart>(*this, std::move(src));
   return true;

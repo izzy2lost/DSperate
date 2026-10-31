@@ -7,6 +7,7 @@
 // frame take? Device-only; not a test.
 //
 //   rga_probe [/dev/videoN] [iters]      (DS_RGA_SW=256x192 DS_RGA_DW=1024x768)
+//   (no device: the first /dev/video* whose driver is rockchip-rga)
 //
 // It fills the source with a pattern, runs the scale `iters` times and
 // checks a few destination pixels, then times a two-screen frame: screen 0
@@ -22,6 +23,7 @@
 #include <linux/videodev2.h>
 #include <poll.h>
 #include <sys/ioctl.h>
+#include "frontend/sdl/dmaheap.h"
 #include <sys/mman.h>
 #include <unistd.h>
 #include <vector>
@@ -31,20 +33,11 @@
 #if defined(V4L2_PIX_FMT_XBGR32) && defined(V4L2_CAP_VIDEO_M2M_MPLANE)   // (V4L2_MEMORY_DMABUF is an enumerator, of the same vintage)
 
 namespace {
-struct dma_heap_allocation_data { uint64_t len; uint32_t fd; uint32_t fd_flags; uint64_t heap_flags; };
-#define DMA_HEAP_IOCTL_ALLOC _IOWR('H', 0x0, struct dma_heap_allocation_data)
-
 int heap_alloc(size_t len) {
-  const char* heaps[] = {"/dev/dma_heap/linux,cma", "/dev/dma_heap/system", nullptr};
-  for (int i = 0; heaps[i]; ++i) {
-    int h = open(heaps[i], O_RDWR | O_CLOEXEC);
-    if (h < 0) continue;
-    dma_heap_allocation_data a{}; a.len = len; a.fd_flags = O_RDWR | O_CLOEXEC;
-    int r = ioctl(h, DMA_HEAP_IOCTL_ALLOC, &a);
-    close(h);
-    if (r == 0) { std::printf("dma-buf %zu bytes from %s\n", len, heaps[i]); return static_cast<int>(a.fd); }
-  }
-  return -1;
+  // The frontend's allocator (DS_DMA_HEAP picks the source).
+  const int fd = ds::sdl::dmaheap::alloc(len, [](int) { return true; }, "rga_probe");
+  if (fd >= 0) std::printf("dma-buf %zu bytes from %s\n", len, ds::sdl::dmaheap::chosen());
+  return fd;
 }
 
 int xioctl(int fd, unsigned long req, void* arg) { int r; do r = ioctl(fd, req, arg); while (r < 0 && errno == EINTR); return r; }
@@ -53,7 +46,7 @@ bool set_fmt(int fd, uint32_t type, uint32_t w, uint32_t h, uint32_t pixfmt, uin
   v4l2_format f{}; f.type = static_cast<v4l2_buf_type>(type);   // the RGA is a multi-planar mem2mem device (one plane for RGB)
   f.fmt.pix_mp.width = w; f.fmt.pix_mp.height = h; f.fmt.pix_mp.pixelformat = pixfmt; f.fmt.pix_mp.field = V4L2_FIELD_NONE; f.fmt.pix_mp.num_planes = 1;
   if (xioctl(fd, VIDIOC_S_FMT, &f) < 0) { std::perror("S_FMT"); return false; }
-  if (f.fmt.pix_mp.pixelformat != pixfmt) { std::printf("driver changed the format to %.4s\n", reinterpret_cast<char*>(&f.fmt.pix_mp.pixelformat)); }
+  if (f.fmt.pix_mp.pixelformat != pixfmt) { std::printf("driver changed the format to %.4s\n", reinterpret_cast<char*>(&f.fmt.pix_mp.pixelformat)); return false; }
   *stride = f.fmt.pix_mp.plane_fmt[0].bytesperline; *size = f.fmt.pix_mp.plane_fmt[0].sizeimage;
   std::printf("%s: %ux%u %.4s stride %u size %u planes %u\n", type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ? "output " : "capture", f.fmt.pix_mp.width, f.fmt.pix_mp.height,
               reinterpret_cast<char*>(&f.fmt.pix_mp.pixelformat), *stride, *size, f.fmt.pix_mp.num_planes);
@@ -104,18 +97,34 @@ bool run_job(int fd, int sfd, uint32_t sbytes, int dfd, uint32_t dbytes) {
 }
 
 void parse_wh(const char* env, uint32_t* w, uint32_t* h) { if (const char* s = std::getenv(env)) std::sscanf(s, "%ux%u", w, h); }
+
+bool is_rga(int fd, v4l2_capability* cap) {
+  return xioctl(fd, VIDIOC_QUERYCAP, cap) == 0 && std::strcmp(reinterpret_cast<const char*>(cap->driver), "rockchip-rga") == 0;
+}
 }
 
 int main(int argc, char** argv) {
-  const char* dev = argc > 1 ? argv[1] : "/dev/video2";
   const int iters = argc > 2 ? std::atoi(argv[2]) : 300;
   uint32_t sw = 256, sh = 192, dw = 1024, dh = 768;
   parse_wh("DS_RGA_SW", &sw, &sh); parse_wh("DS_RGA_DW", &dw, &dh);
 
-  int fd = open(dev, O_RDWR | O_NONBLOCK | O_CLOEXEC);
-  if (fd < 0) { std::perror(dev); return 1; }
+  // The node numbering differs per board (video2 is the Hantro encoder on the RK3566 handhelds).
+  char found[32] = "";
+  int fd = -1;
   v4l2_capability cap{};
-  if (xioctl(fd, VIDIOC_QUERYCAP, &cap) < 0) { std::perror("QUERYCAP"); return 1; }
+  if (argc > 1) {
+    fd = open(argv[1], O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) { std::perror(argv[1]); return 1; }
+    if (!is_rga(fd, &cap)) { std::printf("%s is not the rockchip-rga (driver %s)\n", argv[1], cap.driver); return 1; }
+  } else {
+    for (int i = 0; i < 16 && fd < 0; ++i) {
+      std::snprintf(found, sizeof found, "/dev/video%d", i);
+      fd = open(found, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+      if (fd >= 0 && !is_rga(fd, &cap)) { close(fd); fd = -1; }
+    }
+    if (fd < 0) { std::printf("no rockchip-rga V4L2 device\n"); return 1; }
+  }
+  const char* dev = argc > 1 ? argv[1] : found;
   std::printf("%s: driver %s card %s caps 0x%08x device caps 0x%08x\n", dev, cap.driver, cap.card, cap.capabilities, cap.device_caps);
 
   // Formats on offer.

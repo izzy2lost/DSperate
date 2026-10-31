@@ -6,17 +6,29 @@
 // scanout sink's own dma-buf, one job per shown view, with crop on the
 // output queue and compose on the capture queue for the layout. Neither the
 // CPU nor the GPU touches a panel-sized pixel: the CPU copies the two 1x
-// frames into small CMA source buffers (192 KB each), the RGA does the rest
+// frames into small dma-buf source buffers (192 KB each), the RGA does the rest
 // in ~1 ms a view, and the present thread waits on it with poll().
+//
+// The driver's scaler filters (bilinear; there is no filter control), so
+// with video.linear off a view at a whole-number scale k takes an exact
+// path instead, where no job scales: the CPU repeats each pixel k times
+// across into a 256k x 192 strip, and k 1:1 jobs repeat its rows. Those
+// jobs describe the panel buffer as k*W wide and H/k tall, which puts k
+// physical rows side by side in one row of the description, so a job
+// composed at x = j*W lands on physical rows k*s + j. The strip of the next
+// view is written while the RGA runs the last job of the one before. At 4x
+// on 1024x768 a view costs ~0.9 ms of CPU and ~2.7 ms of RGA (bilinear:
+// ~1.8 ms of RGA); tests/rga_nearest_probe.cpp measures it. Fractional
+// scales, and views the exact path cannot place, stay bilinear.
 //
 // What the RGA cannot do is done by the CPU on the finished buffer, over
 // the pixels concerned only: the frontend's overlay (OSD, pause menu) over
 // the rectangle it drew; a fading PiP inset, which the RGA scales into a
 // scratch buffer and the CPU blends in; the LCD grid's seam columns and
-// rows (the same placement as the scanline scaler's). The filter is the
-// RGA's bilinear; nearest, seams and chunky cells do not exist on this
-// route (the menu greys them out). Rotation: the presenter refuses to open
-// and the scanline scaler handles rotated panels.
+// rows (the same placement as the scanline scaler's). Seams and chunky
+// cells do not exist on this route (the menu greys them out). Rotation:
+// the presenter refuses to open and the scanline scaler handles rotated
+// panels.
 #include "frontend/sdl/video/presenter.h"
 #include "frontend/sdl/scanout.h"
 #include "frontend/sdl/dmaheap.h"
@@ -55,13 +67,43 @@ namespace {
 
 constexpr int kSlots = 2;               // frames in flight: the one being composed and the one the RGA reads
 constexpr u32 kFrameBytes = ds::SCREEN_W * ds::SCREEN_H * 4;
+constexpr u32 kMaxK = 16;               // exact path: the widest scale (the driver's formats stop at 8192 px)
+constexpr int kMinSide = 34;            // the driver's smallest crop / compose side
 
 int xioctl(int fd, unsigned long req, void* arg) { int r; do r = ioctl(fd, req, arg); while (r < 0 && errno == EINTR); return r; }
 
+bool v4l_reqbufs(int fd, u32 type, u32 n) {
+  v4l2_requestbuffers rb{}; rb.type = static_cast<v4l2_buf_type>(type); rb.memory = V4L2_MEMORY_DMABUF; rb.count = n;
+  return xioctl(fd, VIDIOC_REQBUFS, &rb) == 0 && rb.count >= n;
+}
+bool v4l_stream(int fd, u32 type, bool on) { int tt = static_cast<int>(type); return xioctl(fd, on ? VIDIOC_STREAMON : VIDIOC_STREAMOFF, &tt) == 0; }
+bool v4l_select(int fd, u32 type, u32 target, const frontend::Rect& r) {
+  v4l2_selection s{}; s.type = type; s.target = target; s.r.left = r.x; s.r.top = r.y; s.r.width = static_cast<u32>(r.w); s.r.height = static_cast<u32>(r.h);
+  return xioctl(fd, VIDIOC_S_SELECTION, &s) == 0;
+}
+bool v4l_queue(int fd, u32 type, int dmafd, u32 bytes) {
+  v4l2_plane pl{}; pl.m.fd = dmafd; pl.length = bytes; if (type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) pl.bytesused = bytes;
+  v4l2_buffer b{}; b.type = static_cast<v4l2_buf_type>(type); b.memory = V4L2_MEMORY_DMABUF; b.index = 0; b.m.planes = &pl; b.length = 1;
+  return xioctl(fd, VIDIOC_QBUF, &b) == 0;
+}
+bool v4l_dequeue(int fd, u32 type) {
+  v4l2_plane pl{};
+  v4l2_buffer b{}; b.type = static_cast<v4l2_buf_type>(type); b.memory = V4L2_MEMORY_DMABUF; b.m.planes = &pl; b.length = 1;
+  return xioctl(fd, VIDIOC_DQBUF, &b) == 0;
+}
+// XBGR32 at exactly w x h; the stride and image size the driver settled on.
+bool v4l_format(int fd, u32 type, u32 w, u32 h, u32* stride, u32* bytes) {
+  v4l2_format f{}; f.type = static_cast<v4l2_buf_type>(type);
+  f.fmt.pix_mp.width = w; f.fmt.pix_mp.height = h; f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_XBGR32; f.fmt.pix_mp.field = V4L2_FIELD_NONE; f.fmt.pix_mp.num_planes = 1;
+  if (xioctl(fd, VIDIOC_S_FMT, &f) < 0 || f.fmt.pix_mp.width != w || f.fmt.pix_mp.height != h || f.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_XBGR32) return false;
+  *stride = f.fmt.pix_mp.plane_fmt[0].bytesperline; *bytes = f.fmt.pix_mp.plane_fmt[0].sizeimage;
+  return true;
+}
+
 // The RGA node: DS_RGA_DEVICE, else the first /dev/video* whose driver is rockchip-rga.
-int open_rga(std::string* why) {
-  auto try_open = [](const char* path) -> int {
-    int fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+int open_rga(std::string* why, std::string* path) {
+  auto try_open = [](const char* p) -> int {
+    int fd = open(p, O_RDWR | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) return -1;
     v4l2_capability cap{};
     if (xioctl(fd, VIDIOC_QUERYCAP, &cap) < 0 || std::strcmp(reinterpret_cast<const char*>(cap.driver), "rockchip-rga") != 0 ||
@@ -71,16 +113,47 @@ int open_rga(std::string* why) {
   if (const char* d = std::getenv("DS_RGA_DEVICE")) {
     const int fd = try_open(d);
     if (fd < 0 && why) *why = std::string(d) + " is not a rockchip-rga mem2mem device";
+    if (fd >= 0) *path = d;
     return fd;
   }
   for (int i = 0; i < 16; ++i) {
-    char path[32]; std::snprintf(path, sizeof path, "/dev/video%d", i);
-    const int fd = try_open(path);
-    if (fd >= 0) return fd;
+    char p[32]; std::snprintf(p, sizeof p, "/dev/video%d", i);
+    const int fd = try_open(p);
+    if (fd >= 0) { *path = p; return fd; }
   }
   if (why) *why = "no rockchip-rga V4L2 device";
   return -1;
 }
+
+// Each pixel of the frame k times across: the exact path's 256k x 192 strip
+// (no row padding, so one run over the whole frame). The CPU's write rate
+// to RAM bounds it, ~1 GB/s on the RK3566, not the instructions.
+void repeat_columns(const u32* s, u32* d, u32 k) {
+  const size_t n = static_cast<size_t>(ds::SCREEN_W) * ds::SCREEN_H;
+  if (k == 1) { std::memcpy(d, s, n * 4); return; }
+  size_t x = 0;
+#if DSPERATE_NEON
+  // One interleaving store of k copies of a vector writes its 4 pixels k times each.
+  if (k == 2)
+    for (; x + 8 <= n; x += 8) {
+      const uint32x4_t a = vld1q_u32(s + x), b = vld1q_u32(s + x + 4);
+      vst2q_u32(d + 2 * x, (uint32x4x2_t{{a, a}})); vst2q_u32(d + 2 * x + 8, (uint32x4x2_t{{b, b}}));
+    }
+  else if (k == 3)
+    for (; x + 8 <= n; x += 8) {
+      const uint32x4_t a = vld1q_u32(s + x), b = vld1q_u32(s + x + 4);
+      vst3q_u32(d + 3 * x, (uint32x4x3_t{{a, a, a}})); vst3q_u32(d + 3 * x + 12, (uint32x4x3_t{{b, b, b}}));
+    }
+  else if (k == 4)
+    for (; x + 8 <= n; x += 8) {
+      const uint32x4_t a = vld1q_u32(s + x), b = vld1q_u32(s + x + 4);
+      vst4q_u32(d + 4 * x, (uint32x4x4_t{{a, a, a, a}})); vst4q_u32(d + 4 * x + 16, (uint32x4x4_t{{b, b, b, b}}));
+    }
+#endif
+  for (; x < n; ++x) for (u32 i = 0; i < k; ++i) d[x * k + i] = s[x];
+}
+
+int floor_div(int a, int b) { return a >= 0 ? a / b : -((-a + b - 1) / b); }
 
 class RgaPresenter final : public FramePresenter {
 public:
@@ -92,7 +165,9 @@ public:
   ~RgaPresenter() override {
     sink_.set_gpu_writes(false);
     if (fd_ >= 0) { stream(false); close(fd_); }
+    close_rows();
     for (Src& s : src_) for (int k = 0; k < frontend::SCREENS; ++k) { if (s.px[k]) munmap(s.px[k], kFrameBytes); if (s.fd[k] >= 0) close(s.fd[k]); }
+    for (Strip& s : strip_) { if (s.px) munmap(s.px, s.bytes); if (s.fd >= 0) close(s.fd); }
     if (scratch_px_) munmap(scratch_px_, scratch_bytes_);
     if (scratch_fd_ >= 0) close(scratch_fd_);
   }
@@ -101,6 +176,7 @@ public:
   Fit fit(SDL_Window* win, int w, int h) override {
     if (w == sink_.width() && h == sink_.height()) return Fit::Same;
     std::string why;
+    close_rows();   // their capture side describes the old buffer
     if (sink_.reopen(win, w, h) && setup_capture(&why)) { cleared_.assign(static_cast<size_t>(std::max(0, sink_.bufs())), false); return Fit::Changed; }
     std::fprintf(stderr, "rga present: %s\n", why.c_str());
     lost_ = true;
@@ -117,9 +193,39 @@ public:
     // DS_RGA_DUMP=N:FILE: the finished panel buffer of the N-th presented frame, raw XRGB rows, and the views (diagnostic).
     static const char* dump = std::getenv("DS_RGA_DUMP");
     static const u64 dump_at = dump && std::strchr(dump, ':') ? std::strtoull(dump, nullptr, 10) : 300;
+    // Each view's jobs: the exact path where it applies, else one scaling job.
+    Plan plan[frontend::SCREENS];
+    bool want_src[frontend::SCREENS] = {};
+    u64 exact_sig = 0;
+    for (int i = 0; i < nviews && i < frontend::SCREENS; ++i) {
+      const View& v = views[i];
+      Plan& pl = plan[i];
+      if (!v.shown || v.rect.w <= 0 || v.rect.h <= 0) continue;
+      const u32 k = p.linear ? 0 : exact_scale(v.rect);
+      if (k && plan_exact(i, v.rect, k, plane, pl)) { exact_sig = exact_sig * 31 + k; continue; }
+      // Clip the view to the buffer (the layout can hang over on an odd window).
+      frontend::Rect r = v.rect;
+      int sx = 0, sy = 0, sw = static_cast<int>(ds::SCREEN_W), sh = static_cast<int>(ds::SCREEN_H);
+      if (r.x < 0) { sx = -r.x * sw / r.w; sw -= sx; r.w += r.x; r.x = 0; }
+      if (r.y < 0) { sy = -r.y * sh / r.h; sh -= sy; r.h += r.y; r.y = 0; }
+      if (r.x + r.w > static_cast<int>(plane.width)) { const int over = r.x + r.w - static_cast<int>(plane.width); sw -= over * sw / r.w; r.w -= over; }
+      if (r.y + r.h > static_cast<int>(plane.height)) { const int over = r.y + r.h - static_cast<int>(plane.height); sh -= over * sh / r.h; r.h -= over; }
+      if (r.w <= 0 || r.h <= 0 || sw <= 0 || sh <= 0) continue;
+      pl.on = true; pl.k = 0; pl.r = r; pl.n = 1;
+      pl.job[0] = Job{frontend::Rect{sx, sy, sw, sh}, r};
+      want_src[v.screen] = true;
+      exact_sig = exact_sig * 31 + (k ? 100 : 0);   // 100: wanted exact, could not place it
+    }
+    if (exact_sig != exact_sig_) {
+      exact_sig_ = exact_sig;
+      if (std::getenv("DS_VERBOSE"))
+        for (int i = 0; i < nviews && i < frontend::SCREENS; ++i) if (plan[i].on)
+          std::fprintf(stderr, "rga present: view %d %s\n", i, plan[i].k ? ("exact " + std::to_string(plan[i].k) + "x (column strip + " + std::to_string(plan[i].n) + " row jobs)").c_str() : "bilinear");
+    }
+    // The 1x frames the scaling jobs read (CPU write, cache cleaned for the device).
     const Src& s = src_[frame_ % kSlots];
-    // The 1x frames into the RGA's source buffers (CPU write, cache cleaned for the device).
     for (int k = 0; k < frontend::SCREENS; ++k) {
+      if (!want_src[k]) continue;
       dmaheap::sync_begin_write(s.fd[k]);
       std::memcpy(s.px[k], fb[k], kFrameBytes);
       dmaheap::sync_end_write(s.fd[k]);
@@ -134,23 +240,42 @@ public:
       dmaheap::sync_end_write(plane.fd);
       cleared_[static_cast<size_t>(buf)] = true;
     }
+    // The exact views' strips: the first now, each next one while the RGA
+    // runs the last job of the view before it.
+    bool written[frontend::SCREENS] = {};
+    auto write_strip_after = [&](int after) {
+      for (int i = after + 1; i < nviews && i < frontend::SCREENS; ++i) {
+        if (!plan[i].on || !plan[i].k) continue;
+        if (!written[i]) {
+          const Strip& st = strip_[i];
+          dmaheap::sync_begin_write(st.fd);
+          repeat_columns(fb[views[i].screen], st.px, plan[i].k);
+          dmaheap::sync_end_write(st.fd);
+          written[i] = true;
+        }
+        return;
+      }
+    };
+    write_strip_after(-1);
     bool shown = false;
     for (int i = 0; i < nviews && i < frontend::SCREENS; ++i) {
       const View& v = views[i];
-      if (!v.shown || v.rect.w <= 0 || v.rect.h <= 0) continue;
-      // Clip the view to the buffer (the layout can hang over on an odd window).
-      frontend::Rect r = v.rect;
-      int sx = 0, sy = 0, sw = static_cast<int>(ds::SCREEN_W), sh = static_cast<int>(ds::SCREEN_H);
-      if (r.x < 0) { sx = -r.x * sw / r.w; sw -= sx; r.w += r.x; r.x = 0; }
-      if (r.y < 0) { sy = -r.y * sh / r.h; sh -= sy; r.h += r.y; r.y = 0; }
-      if (r.x + r.w > static_cast<int>(plane.width)) { const int over = r.x + r.w - static_cast<int>(plane.width); sw -= over * sw / r.w; r.w -= over; }
-      if (r.y + r.h > static_cast<int>(plane.height)) { const int over = r.y + r.h - static_cast<int>(plane.height); sh -= over * sh / r.h; r.h -= over; }
-      if (r.w <= 0 || r.h <= 0 || sw <= 0 || sh <= 0) continue;
+      const Plan& pl = plan[i];
+      if (!pl.on) continue;
+      const frontend::Rect& r = pl.r;
       const bool fade = v.blends && p.inset_alpha < 255;
       if (fade && !scratch_ready(plane)) { std::fprintf(stderr, "rga present: no scratch buffer for the fading inset (%s); drawn opaque\n", std::strerror(errno)); }
       const bool via_scratch = fade && scratch_fd_ >= 0;
-      if (dump && frame_ == dump_at) std::fprintf(stderr, "rga present: view %d screen %d rect %d,%d %dx%d shown %d blends %d alpha %u fade %d scratch %d\n", i, v.screen, v.rect.x, v.rect.y, v.rect.w, v.rect.h, v.shown, v.blends, p.inset_alpha, fade, via_scratch);
-      if (!job(s.fd[v.screen], sx, sy, sw, sh, via_scratch ? scratch_fd_ : plane.fd, r)) { lost_ = true; sink_.end_frame(); return false; }
+      if (dump && frame_ == dump_at) std::fprintf(stderr, "rga present: view %d screen %d rect %d,%d %dx%d shown %d blends %d alpha %u fade %d scratch %d exact %u\n", i, v.screen, v.rect.x, v.rect.y, v.rect.w, v.rect.h, v.shown, v.blends, p.inset_alpha, fade, via_scratch, pl.k);
+      const int dfd = via_scratch ? scratch_fd_ : plane.fd;
+      const int jfd = pl.k ? rows_[pl.k].fd : fd_;
+      const int sfd = pl.k ? strip_[i].fd : s.fd[v.screen];
+      const u32 sbytes = pl.k ? rows_[pl.k].strip_bytes : src_bytes_, dbytes = pl.k ? rows_[pl.k].dst_bytes : dst_bytes_;
+      for (int j = 0; j < pl.n; ++j) {
+        if (!submit(jfd, sfd, sbytes, pl.job[j].crop, dfd, dbytes, pl.job[j].compose)) { lost_ = true; sink_.end_frame(); return false; }
+        if (j == pl.n - 1) write_strip_after(i);
+        if (!finish(jfd)) { lost_ = true; sink_.end_frame(); return false; }
+      }
       if (via_scratch) {
         // The inset over what is there, at its alpha (a fade timer on the PiP).
         dmaheap::sync_begin_write(plane.fd);
@@ -219,6 +344,84 @@ private:
   explicit RgaPresenter(ScanoutOut& sink) : sink_(sink) {}
 
   struct Src { int fd[frontend::SCREENS] = {-1, -1}; u32* px[frontend::SCREENS] = {}; };
+  // One job: a rectangle of the source into a rectangle of the destination.
+  struct Job { frontend::Rect crop, compose; };
+  // A view's jobs this frame. k = 0: one scaling job from the 1x frame;
+  // k > 0: the exact path, a job per band from the view's strip.
+  struct Plan { bool on = false; u32 k = 0; frontend::Rect r; Job job[kMaxK]; int n = 0; };
+  // The exact path's context for one scale: output 256k x 192 (the strip),
+  // capture the panel described as k*W x H/k. Opened on first use.
+  struct RowCtx { int fd = -1; u32 strip_bytes = 0, dst_bytes = 0; bool failed = false; };
+  struct Strip { int fd = -1; u32* px = nullptr; size_t bytes = 0; };
+
+  // k if the view is exactly k x 256 by k x 192, else 0.
+  static u32 exact_scale(const frontend::Rect& r) {
+    if (r.w <= 0 || r.w % static_cast<int>(ds::SCREEN_W) || r.h % static_cast<int>(ds::SCREEN_H)) return 0;
+    const u32 k = static_cast<u32>(r.w) / ds::SCREEN_W;
+    return k == static_cast<u32>(r.h) / ds::SCREEN_H && k <= kMaxK ? k : 0;
+  }
+
+  // The exact path's jobs for view `i` at `k`x, clipped to the buffer. Band
+  // j holds the strip's rows s at panel rows y0 + k*s + j; in the k*W x H/k
+  // description that is row (y0 + j + k*s) / k at x offset ((y0 + j) mod k) * W.
+  // False (the view goes bilinear) where the description cannot reach it:
+  // a slice under the driver's 34 px minimum, rows past the last whole
+  // multiple of k, or a context or strip that will not open.
+  bool plan_exact(int i, const frontend::Rect& v, u32 k, const ScanoutOut::DmabufPlane& plane, Plan& pl) {
+    const int W = static_cast<int>(plane.width), H = static_cast<int>(plane.height), kk = static_cast<int>(k);
+    const int he = H / kk * kk;   // rows the description reaches
+    if (k * plane.width > 8192 || H / kk < kMinSide) return false;
+    const int cx0 = std::max(0, v.x), cx1 = std::min(W, v.x + v.w), cy0 = std::max(0, v.y), cy1 = std::min(H, v.y + v.h);
+    if (cx1 - cx0 < kMinSide || cy1 <= cy0 || cy1 > he) return false;
+    int n = 0;
+    for (int j = 0; j < kk; ++j) {
+      const int lo = v.y + j;   // panel row of the strip's row 0 in this band
+      const int s0 = std::max(0, floor_div(-lo + kk - 1, kk)), s1 = std::min(static_cast<int>(ds::SCREEN_H) - 1, floor_div(he - 1 - lo, kk));
+      if (s1 < s0) continue;
+      if (s1 - s0 + 1 < kMinSide) return false;
+      const int y = lo + kk * s0;
+      pl.job[n++] = Job{frontend::Rect{cx0 - v.x, s0, cx1 - cx0, s1 - s0 + 1}, frontend::Rect{(y % kk) * W + cx0, y / kk, cx1 - cx0, s1 - s0 + 1}};
+    }
+    if (!n || !rows_ready(k, plane) || !strip_ready(i, rows_[k].strip_bytes)) return false;
+    pl.on = true; pl.k = k; pl.n = n;
+    pl.r = frontend::Rect{cx0, cy0, cx1 - cx0, cy1 - cy0};
+    return true;
+  }
+
+  bool rows_ready(u32 k, const ScanoutOut::DmabufPlane& plane) {
+    RowCtx& c = rows_[k];
+    if (c.fd >= 0) return true;
+    if (c.failed) return false;
+    c.fd = ::open(dev_.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    u32 stride = 0, cstride = 0;
+    const bool ok = c.fd >= 0 &&
+      v4l_format(c.fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, ds::SCREEN_W * k, ds::SCREEN_H, &stride, &c.strip_bytes) && stride == ds::SCREEN_W * k * 4 &&
+      v4l_format(c.fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, plane.width * k, plane.height / k, &cstride, &c.dst_bytes) && cstride == plane.stride_bytes * k &&
+      v4l_reqbufs(c.fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, 1) && v4l_reqbufs(c.fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, 1) &&
+      v4l_stream(c.fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, true) && v4l_stream(c.fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, true);
+    if (ok) return true;
+    std::fprintf(stderr, "rga present: no exact %ux path on %ux%u (%s); that scale stays bilinear\n", k, plane.width, plane.height, std::strerror(errno));
+    if (c.fd >= 0) close(c.fd);
+    c.fd = -1; c.failed = true;
+    return false;
+  }
+  void close_rows() {
+    for (RowCtx& c : rows_) { if (c.fd >= 0) { v4l_stream(c.fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, false); v4l_stream(c.fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, false); close(c.fd); } c = RowCtx{}; }
+  }
+  // View i's strip, at least `bytes` (kept across frames; a larger scale reallocates).
+  bool strip_ready(int i, size_t bytes) {
+    Strip& s = strip_[i];
+    if (s.fd >= 0 && s.bytes >= bytes) return true;
+    if (s.px) munmap(s.px, s.bytes);
+    if (s.fd >= 0) close(s.fd);
+    s = Strip{};
+    s.fd = dmaheap::alloc(bytes, [](int) { return true; }, "rga");
+    if (s.fd < 0) return false;
+    void* m = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, s.fd, 0);
+    if (m == MAP_FAILED) { close(s.fd); s.fd = -1; return false; }
+    s.px = static_cast<u32*>(m); s.bytes = bytes;
+    return true;
+  }
 
   // A panel-sized buffer the RGA scales a fading inset into (allocated on first need).
   bool scratch_ready(const ScanoutOut::DmabufPlane& plane) {
@@ -294,13 +497,13 @@ private:
   struct Over { std::vector<u32> px; int w = 0, h = 0; frontend::Rect dirty; };
 
   bool init(std::string* why) {
-    fd_ = open_rga(why);
+    fd_ = open_rga(why, &dev_);
     if (fd_ < 0) return false;
     // Source: 256x192 XRGB8888. V4L2 names it by byte order (B G R X): XR24 is
     // what the driver lists; the probe confirmed the channels land right.
     if (!set_format(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, ds::SCREEN_W, ds::SCREEN_H, why)) return false;
-    if (!reqbufs(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, 1)) { if (why) *why = "RGA refuses dma-buf output buffers"; return false; }
-    if (!stream_one(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, true)) { if (why) *why = "RGA output stream on failed"; return false; }
+    if (!v4l_reqbufs(fd_, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, 1)) { if (why) *why = "RGA refuses dma-buf output buffers"; return false; }
+    if (!v4l_stream(fd_, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, true)) { if (why) *why = "RGA output stream on failed"; return false; }
     if (!setup_capture(why)) return false;
     for (Src& s : src_) for (int k = 0; k < frontend::SCREENS; ++k) {
       s.fd[k] = dmaheap::alloc(kFrameBytes, [](int) { return true; }, "rga");
@@ -315,28 +518,23 @@ private:
   }
 
   bool set_format(u32 type, u32 w, u32 h, std::string* why) {
-    v4l2_format f{}; f.type = static_cast<v4l2_buf_type>(type);
-    f.fmt.pix_mp.width = w; f.fmt.pix_mp.height = h; f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_XBGR32; f.fmt.pix_mp.field = V4L2_FIELD_NONE; f.fmt.pix_mp.num_planes = 1;
-    if (xioctl(fd_, VIDIOC_S_FMT, &f) < 0 || f.fmt.pix_mp.width != w || f.fmt.pix_mp.height != h || f.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_XBGR32) {
+    u32 stride = 0, bytes = 0;
+    if (!v4l_format(fd_, type, w, h, &stride, &bytes)) {
       if (why) *why = std::string("RGA refuses the ") + std::to_string(w) + "x" + std::to_string(h) + " frame format: " + std::strerror(errno);
       return false;
     }
-    if (type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) src_bytes_ = f.fmt.pix_mp.plane_fmt[0].sizeimage;
-    else { dst_bytes_ = f.fmt.pix_mp.plane_fmt[0].sizeimage; dst_stride_ = f.fmt.pix_mp.plane_fmt[0].bytesperline; }
+    if (type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) src_bytes_ = bytes;
+    else { dst_bytes_ = bytes; dst_stride_ = stride; }
     return true;
-  }
-  bool reqbufs(u32 type, u32 n) {
-    v4l2_requestbuffers rb{}; rb.type = static_cast<v4l2_buf_type>(type); rb.memory = V4L2_MEMORY_DMABUF; rb.count = n;
-    return xioctl(fd_, VIDIOC_REQBUFS, &rb) == 0 && rb.count >= n;
   }
   // The capture side follows the sink's buffer: a format change is refused
   // while the queue holds buffers, so it is torn down and set up again.
   bool setup_capture(std::string* why) {
-    stream_one(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, false);
-    reqbufs(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, 0);
+    v4l_stream(fd_, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, false);
+    v4l_reqbufs(fd_, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, 0);
     if (!set_capture_format(why)) return false;
-    if (!reqbufs(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, 1)) { if (why) *why = "RGA refuses dma-buf capture buffers"; return false; }
-    if (!stream_one(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, true)) { if (why) *why = "RGA capture stream on failed"; return false; }
+    if (!v4l_reqbufs(fd_, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, 1)) { if (why) *why = "RGA refuses dma-buf capture buffers"; return false; }
+    if (!v4l_stream(fd_, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, true)) { if (why) *why = "RGA capture stream on failed"; return false; }
     return true;
   }
   bool set_capture_format(std::string* why) {
@@ -347,37 +545,34 @@ private:
     if (dst_stride_ != p.stride_bytes) { if (why) *why = "RGA pitch differs from the scanout pitch"; return false; }
     return true;
   }
-  bool stream_one(u32 type, bool on) { int tt = static_cast<int>(type); return xioctl(fd_, on ? VIDIOC_STREAMON : VIDIOC_STREAMOFF, &tt) == 0; }
-  bool stream(bool on) { return stream_one(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, on) & stream_one(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, on); }
-  bool select(u32 type, u32 target, int x, int y, int w, int h) {
-    v4l2_selection s{}; s.type = type; s.target = target; s.r.left = x; s.r.top = y; s.r.width = static_cast<u32>(w); s.r.height = static_cast<u32>(h);
-    return xioctl(fd_, VIDIOC_S_SELECTION, &s) == 0;
+  bool stream(bool on) { return v4l_stream(fd_, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, on) & v4l_stream(fd_, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, on); }
+  // A job in two halves, so the CPU can work while the RGA runs it: source
+  // rectangle `crop` of `sfd` into `compose` of `dfd` on context `fd`.
+  bool submit(int fd, int sfd, u32 sbytes, const frontend::Rect& crop, int dfd, u32 dbytes, const frontend::Rect& compose) {
+    // The driver checks each rectangle against the other's current size
+    // (at most 16x apart), so a big change of both can need compose first.
+    if (!v4l_select(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, V4L2_SEL_TGT_CROP, crop)) {
+      if (!v4l_select(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_SEL_TGT_COMPOSE, compose) ||
+          !v4l_select(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, V4L2_SEL_TGT_CROP, crop)) return fail("crop");
+    } else if (!v4l_select(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_SEL_TGT_COMPOSE, compose)) return fail("compose");
+    if (!v4l_queue(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, sfd, sbytes) || !v4l_queue(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, dfd, dbytes)) return fail("queue");
+    return true;
   }
-  bool queue(u32 type, int dmafd, u32 bytes) {
-    v4l2_plane pl{}; pl.m.fd = dmafd; pl.length = bytes; if (type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) pl.bytesused = bytes;
-    v4l2_buffer b{}; b.type = static_cast<v4l2_buf_type>(type); b.memory = V4L2_MEMORY_DMABUF; b.index = 0; b.m.planes = &pl; b.length = 1;
-    return xioctl(fd_, VIDIOC_QBUF, &b) == 0;
-  }
-  bool dequeue(u32 type) {
-    v4l2_plane pl{};
-    v4l2_buffer b{}; b.type = static_cast<v4l2_buf_type>(type); b.memory = V4L2_MEMORY_DMABUF; b.m.planes = &pl; b.length = 1;
-    return xioctl(fd_, VIDIOC_DQBUF, &b) == 0;
-  }
-  // One synchronous job: source rectangle of `sfd` into `r` of `dfd`.
-  bool job(int sfd, int sx, int sy, int sw, int sh, int dfd, const frontend::Rect& r) {
-    if (!select(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, V4L2_SEL_TGT_CROP, sx, sy, sw, sh)) return fail("crop");
-    if (!select(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_SEL_TGT_COMPOSE, r.x, r.y, r.w, r.h)) return fail("compose");
-    if (!queue(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, sfd, src_bytes_) || !queue(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, dfd, dst_bytes_)) return fail("queue");
-    pollfd p{fd_, POLLIN | POLLOUT, 0};
+  bool finish(int fd) {
+    pollfd p{fd, POLLIN | POLLOUT, 0};
     if (poll(&p, 1, 500) <= 0) return fail("job timed out");
-    if (!dequeue(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) || !dequeue(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)) return fail("dequeue");
+    if (!v4l_dequeue(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) || !v4l_dequeue(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)) return fail("dequeue");
     return true;
   }
   bool fail(const char* what) { std::fprintf(stderr, "rga present: %s failed: %s\n", what, std::strerror(errno)); return false; }
   ScanoutOut& sink_;
   int fd_ = -1;
+  std::string dev_;             // the node fd_ came from; the exact path's contexts open it too
   u32 src_bytes_ = 0, dst_bytes_ = 0, dst_stride_ = 0;
   Src src_[kSlots];
+  RowCtx rows_[kMaxK + 1];      // by scale
+  Strip strip_[frontend::SCREENS];   // by view
+  u64 exact_sig_ = ~0ull;       // which views went exact, for the log
   int scratch_fd_ = -1; u32* scratch_px_ = nullptr; size_t scratch_bytes_ = 0;
   std::vector<u8> grid_col_, grid_row_;
   std::vector<u16> grid_fac_;

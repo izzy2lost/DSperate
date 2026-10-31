@@ -71,6 +71,7 @@ struct NDS {
   bool load_rom_image(std::vector<u8> image);
   bool load_rom_source(std::unique_ptr<cart::RomSource> src);
   std::string rom_zip_entry;   // which zip entry a zipped ROM came from, empty for a loose .nds; reporting only
+  std::string rom_error;       // why the last load_rom failed, for the player; empty once one loads
   // Loading a zip: extraction target when the archive's own directory can't
   // be written (cart/zip_cache.h), and a progress callback. Set before load_rom.
   std::string rom_cache_dir;

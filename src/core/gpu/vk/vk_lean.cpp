@@ -16,6 +16,7 @@ void* Lean::hires_buffer_of(const u32*) const { return nullptr; }
 GpuPoly* Lean::poly_buffer() { return nullptr; }
 GpuVert* Lean::vert_buffer() { return nullptr; }
 u32* Lean::texel_buffer(u32* cap) { if (cap) *cap = 0; return nullptr; }
+u32* Lean::span_buffer() { return nullptr; }
 GpuPost* Lean::post_buffer() { return nullptr; }
 bool Lean::submit(u32, u32, u32, const GpuFrame&) { return false; }
 void Lean::wait() {}
@@ -96,7 +97,8 @@ struct Lean::Impl {
   std::vector<GpuPoly> host_polys;
   std::vector<GpuVert> host_verts;
   GpuPost host_post{};
-  Buffer polys[kSlots], verts[kSlots], post[kSlots], texels, out[kSlots];
+  Buffer polys[kSlots], verts[kSlots], post[kSlots], texels, out[kSlots], spans[kSlots];
+  std::vector<u32> host_spans;   // the span table staging (vk_layout.h), filled by the caller
   u32 tex_flushed = 0;   // arena words already flushed to the GPU
   VkBufferView texel_view = VK_NULL_HANDLE;
   struct Img { VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; };
@@ -210,7 +212,7 @@ struct Lean::Impl {
     for (VkShaderModule* m : {&mod_vert, &mod_frag, &mod_frag_early, &mod_frag_opq, &mod_frag_trans, &mod_res, &mod_fs}) if (*m) a.vkDestroyShaderModule(vk->dev, *m, nullptr);
     if (texel_view) a.vkDestroyBufferView(vk->dev, texel_view, nullptr);
     if (texels) dev->free(texels);
-    for (u32 i = 0; i < kSlots; ++i) for (Buffer* b : {&polys[i], &verts[i], &post[i], &out[i]}) if (*b) dev->free(*b);
+    for (u32 i = 0; i < kSlots; ++i) for (Buffer* b : {&polys[i], &verts[i], &post[i], &out[i], &spans[i]}) if (*b) dev->free(*b);
   }
 };
 
@@ -231,6 +233,7 @@ GpuPoly* Lean::poly_buffer() { return d_->host_polys.data(); }
 GpuVert* Lean::vert_buffer() { return d_->host_verts.data(); }
 u32* Lean::texel_buffer(u32* cap) { if (cap) *cap = kTexelWords; return static_cast<u32*>(d_->texels.ptr); }
 GpuPost* Lean::post_buffer() { return &d_->host_post; }
+u32* Lean::span_buffer() { return d_->host_spans.data(); }
 const u32* Lean::output() { return newest_ready(false); }
 bool Lean::has_frame() const { return d_->gen != 0; }
 u64 Lean::gpu_ns() const { return d_->last_gpu_ns; }
@@ -259,6 +262,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, u32 scale, std::strin
   // Buffers.
   d.host_polys.resize(DS_MAX_POLYS);
   d.host_verts.resize(DS_MAX_VERTS);
+  d.host_spans.resize(DS_SPAN_TABLE_WORDS);
   d.texels = dev.alloc(sizeof(u32) * kTexelWords, Access::CpuWrite);
   if (!d.texels) return fail("buffer allocation");
   for (u32 i = 0; i < Impl::kSlots; ++i) {
@@ -267,7 +271,8 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, u32 scale, std::strin
     d.post[i] = dev.alloc(sizeof(GpuPost), Access::CpuWrite);
     d.out[i] = dev.alloc(sizeof(u32) * (d.zero_copy ? W * H : SW * SH), Access::CpuRead);
     if (d.scale > 1 && !d.zero_copy) d.native[i].assign(W * H, 0);
-    if (!d.polys[i] || !d.verts[i] || !d.post[i] || !d.out[i]) return fail("buffer allocation");
+    d.spans[i] = dev.alloc(sizeof(u32) * DS_SPAN_TABLE_WORDS, Access::CpuWrite);
+    if (!d.polys[i] || !d.verts[i] || !d.post[i] || !d.out[i] || !d.spans[i]) return fail("buffer allocation");
   }
   {
     VkBufferViewCreateInfo bv{}; bv.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO; bv.buffer = vk_buf(d.texels); bv.format = VK_FORMAT_R32_UINT; bv.offset = 0; bv.range = VK_WHOLE_SIZE;
@@ -283,11 +288,11 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, u32 scale, std::strin
     return fail("lean shaders rejected by the driver");
   d.nostencil = std::getenv("DS_LEAN_NOSTENCIL") && std::atoi(std::getenv("DS_LEAN_NOSTENCIL")) != 0;
 
-  // Descriptors: set 0 = polys, verts, texels (texel buffer), post; set 1 = the MS colour as input attachment.
+  // Descriptors: set 0 = polys, verts, texels (texel buffer), post, spans; set 1 = the MS colour as input attachment.
   {
-    VkDescriptorSetLayoutBinding b[4]{};
-    for (u32 i = 0; i < 4; ++i) { b[i].binding = i; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; b[i].descriptorType = i == 2 ? VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; }
-    VkDescriptorSetLayoutCreateInfo ci{}; ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; ci.bindingCount = 4; ci.pBindings = b;
+    VkDescriptorSetLayoutBinding b[5]{};
+    for (u32 i = 0; i < 5; ++i) { b[i].binding = i; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; b[i].descriptorType = i == 2 ? VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; }
+    VkDescriptorSetLayoutCreateInfo ci{}; ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; ci.bindingCount = 5; ci.pBindings = b;
     if (a.vkCreateDescriptorSetLayout(vk->dev, &ci, nullptr, &d.dsl) != VK_SUCCESS) return fail("descriptor layout");
     VkDescriptorSetLayoutBinding ib[3]{};
     for (u32 i = 0; i < 3; ++i) { ib[i].binding = i; ib[i].descriptorCount = 1; ib[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; ib[i].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; }
@@ -297,7 +302,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, u32 scale, std::strin
     VkPushConstantRange pcr{}; pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; pcr.size = sizeof(GpuFrame);
     VkPipelineLayoutCreateInfo pli{}; pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pli.setLayoutCount = 2; pli.pSetLayouts = sets; pli.pushConstantRangeCount = 1; pli.pPushConstantRanges = &pcr;
     if (a.vkCreatePipelineLayout(vk->dev, &pli, nullptr, &d.layout) != VK_SUCCESS) return fail("pipeline layout");
-    VkDescriptorPoolSize psz[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 * Impl::kSlots}, {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, Impl::kSlots}, {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 3}};
+    VkDescriptorPoolSize psz[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * Impl::kSlots}, {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, Impl::kSlots}, {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 3}};
     VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpi.maxSets = Impl::kSlots + 1; dpi.poolSizeCount = 3; dpi.pPoolSizes = psz;
     if (a.vkCreateDescriptorPool(vk->dev, &dpi, nullptr, &d.pool) != VK_SUCCESS) return fail("descriptor pool");
     VkDescriptorSetLayout layouts[Impl::kSlots + 1];
@@ -309,16 +314,16 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, u32 scale, std::strin
     for (u32 i = 0; i < Impl::kSlots; ++i) d.set[i] = got[i];
     d.set_in = got[Impl::kSlots];
     for (u32 sl = 0; sl < Impl::kSlots; ++sl) {
-      VkDescriptorBufferInfo bi[4]{};
-      const Buffer* src[4] = {&d.polys[sl], &d.verts[sl], &d.texels, &d.post[sl]};
-      VkWriteDescriptorSet w[4]{};
-      for (u32 i = 0; i < 4; ++i) {
+      VkDescriptorBufferInfo bi[5]{};
+      const Buffer* src[5] = {&d.polys[sl], &d.verts[sl], &d.texels, &d.post[sl], &d.spans[sl]};
+      VkWriteDescriptorSet w[5]{};
+      for (u32 i = 0; i < 5; ++i) {
         bi[i].buffer = vk_buf(*src[i]); bi[i].range = VK_WHOLE_SIZE;
         w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[i].dstSet = d.set[sl]; w[i].dstBinding = i; w[i].descriptorCount = 1;
         w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bi[i];
       }
       w[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER; w[2].pBufferInfo = nullptr; w[2].pTexelBufferView = &d.texel_view;
-      a.vkUpdateDescriptorSets(vk->dev, 4, w, 0, nullptr);
+      a.vkUpdateDescriptorSets(vk->dev, 5, w, 0, nullptr);
     }
   }
 
@@ -555,6 +560,10 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   d.dev->flush(d.verts[slot], 0, sizeof(GpuVert) * nvert);
   std::memcpy(d.post[slot].ptr, &d.host_post, sizeof(GpuPost));
   d.dev->flush(d.post[slot], 0, sizeof(GpuPost));
+  {
+    const u32 nrows = std::min<u32>(fin.nrows, DS_MAX_SPAN_ROWS);
+    if (nrows) { std::memcpy(d.spans[slot].ptr, d.host_spans.data(), sizeof(u32) * DS_SPAN_WORDS * nrows); d.dev->flush(d.spans[slot], 0, sizeof(u32) * DS_SPAN_WORDS * nrows); }
+  }
 
   GpuFrame f = fin;
   f.scale = d.scale;

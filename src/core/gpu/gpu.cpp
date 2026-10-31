@@ -22,6 +22,7 @@ namespace ds::gpu {
 namespace {
 bool g_dbg_join = false, g_dbg_gpu = false, g_dbg_vramnz = false, g_dbg_skip = false;
 bool g_no_lazy = false, g_no_lag = false;
+int g_worker_delay_us = 0;
 const char* g_dump_frame = nullptr;
 void read_knobs() {
   static bool done = false;
@@ -34,6 +35,9 @@ void read_knobs() {
   g_dump_frame = std::getenv("DS_DEBUG_DUMP_FRAME");
   g_no_lazy = std::getenv("DS_DEBUG_NOLAZY") != nullptr;   // every frame per-line (the lazy batch's reference)
   g_no_lag = std::getenv("DS_DEBUG_NOLAG") != nullptr;     // per-line lines never stay in flight past their HBlank
+  // Each 2D worker job starts this many us late: widens any window in which the
+  // emulation thread changes what an in-flight line reads (a race shows up every run).
+  if (const char* d = std::getenv("DS_DEBUG_WDELAY")) g_worker_delay_us = std::atoi(d);
 }
 }  // namespace
 
@@ -614,6 +618,7 @@ void Gpu::on_display_fifo(u32 x) {
 // One engine's run of display lines on the worker; engine state is disjoint.
 void Gpu::worker_job(void* self) {
   Gpu& g = *static_cast<Gpu*>(self);
+  if (g_worker_delay_us) { const auto t = std::chrono::steady_clock::now() + std::chrono::microseconds(g_worker_delay_us); while (std::chrono::steady_clock::now() < t) {} }
   for (int e = 0; e < 2; ++e)
     for (u32 l = g.job_first_[e]; l <= g.job_last_[e]; ++l) g.step_engine(e, l);
   for (u32 i = 0; i < g.bscale_n_; ++i) {
@@ -624,6 +629,7 @@ void Gpu::worker_job(void* self) {
 
 void Gpu::worker_b_job(void* self) {
   Gpu& g = *static_cast<Gpu*>(self);
+  if (g_worker_delay_us) { const auto t = std::chrono::steady_clock::now() + std::chrono::microseconds(g_worker_delay_us); while (std::chrono::steady_clock::now() < t) {} }
   for (u32 l = g.bjob_first_; l <= g.bjob_last_; ++l) g.step_engine(1, l);
 }
 
@@ -712,8 +718,11 @@ void Gpu::render_ranges(u32 af, u32 al, u32 bf, u32 bl) {
     if (b_has && b_len < 24 && !parked_at_decision) prof::add(prof::C_RR_SHORT_HANDED_AWAKE, 1);
     if (b_has && b_len < 24 && parked_at_decision) prof::add(prof::C_RR_SHORT_INLINE_PARKED, 1);
   }
-  if (a_has && al == SCREEN_H - 1 && (a_len >= 24 || (!worker_.parked() && a_len >= b_len))) {
+  if (a_has && al == SCREEN_H - 1 && (a_len >= 24 || (!worker_.parked() && a_len >= b_len)) && trap_armed_ && (trap_mask_ & 1)) {
     // Run to the last display line: deferred join, engine B drawn here meanwhile.
+    // Only under the trap over A's windows: the job stays in flight through
+    // VBlank, when games stream VRAM. A per-line engine A outside a lag frame
+    // (lag dropped mid-frame) has none, so its last line is drawn and joined now.
     prof::add(prof::C_RR_DEFER_A, 1);
     hand(true, false);
     a_handed = true; a_deferred_ = true;
@@ -1156,10 +1165,12 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
   // dimmed, so each DS pixel shows a lit cell with a dark seam right/below.
   // A run of one pixel is left alone. Only runs the fractional scale widened
   // carry a seam (min_run = ceil(scale)); the seam leads its run. At exactly
-  // 2x a seam per pixel reads as a wash, so it goes on every other pixel instead (4-pixel pitch).
+  // 2x a full-strength seam per pixel reads as a wash, so a black seam goes on every other pixel instead
+  // (4-pixel pitch); a dimmed one stays on every pixel.
   const u32 w = t.xrun[SCREEN_W];
   const u32 min_run = (w + SCREEN_W - 1) / SCREEN_W, min_rows = (t.h + SCREEN_H - 1) / SCREEN_H;
-  const u32 pitch_x = w == 2 * SCREEN_W ? 2 : 1, pitch_y = t.h == 2 * SCREEN_H ? 2 : 1;
+  const bool black = t.grid == 0;
+  const u32 pitch_x = black && w == 2 * SCREEN_W ? 2 : 1, pitch_y = black && t.h == 2 * SCREEN_H ? 2 : 1;
   const bool seam = y1 - y0 >= std::max<u32>(2, min_rows) && first % pitch_y == 0;
   const u32 yfirst = seam ? y0 + 1 : y0;
   row = stage ? row_scratch_[screen] : row_at(t, yfirst);

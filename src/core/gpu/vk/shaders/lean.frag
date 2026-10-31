@@ -8,6 +8,7 @@
 #define DS_GLSL 1
 #include "vk_layout.h"
 layout(std430, binding = 0) readonly buffer Polys  { GpuPoly polys[]; };
+layout(std430, binding = 4) readonly buffer Spans  { uvec4 spans[]; };   // the span table (vk_layout.h): DS_SPAN_WORDS = two uvec4 per row
 #define DS_TEXEL_BUFFER 1
 layout(binding = 2) uniform usamplerBuffer texels_tb;
 layout(std430, binding = 3) readonly buffer Post   { GpuPost ps; };
@@ -35,23 +36,98 @@ layout(early_fragment_tests) in;
 vec2 st_bounds_lo(GpuPoly p) { return vec2(float(int(p.row_base & 0xFFFFu) - 32768), float(int(p.pad_ & 0xFFFFu) - 32768)); }
 vec2 st_bounds_hi(GpuPoly p) { return vec2(float(int(p.row_base >> 16) - 32768), float(int(p.pad_ >> 16) - 32768)); }
 
+// The DS's own attributes for this pixel: the row's span endpoints from the
+// span table (vk_layout.h, the CPU raster's Slope/Interp output), then the
+// hardware's fixed-point interpolation along the row (kernels_ref.cpp:
+// span_factor, span_attr_persp, lin_at), so colour and texcoords equal the
+// CPU raster's at every pixel the DS draws. A pixel the GPU's coverage
+// reaches past the span reads the nearest endpoint. False: no row (the
+// fallback is the hardware's interpolation).
+// Exact unsigned a / b for the quotients here (at most 2^17), as a float
+// divide and one correction: Mali has no integer divider.
+uint ds_udiv(uint a, uint b) {
+  uint q = uint(float(a) / float(b));
+  uint r = a - q * b;
+  if (r >= b) ++q; else if (r > a) --q;   // r wrapped: q was one too many
+  return q;
+}
+// The same with a reciprocal already in hand (the row's 1/xdiff, shared by
+// five quotients): a product's rounding can be off by two, so two corrections.
+uint ds_rdiv(uint n, uint d, float rcp) {
+  uint q = uint(float(n) * rcp);
+  uint r = n - q * d;
+  if (r > n) { --q; r += d; if (r > n) --q; }
+  else if (r >= d) { ++q; r -= d; if (r >= d) ++q; }
+  return q;
+}
+int ds_persp(int y0, int y1, uint fac) {
+  if (y0 == y1) return y0;
+  if (y0 < y1) return y0 + int((uint(y1 - y0) * fac) >> 8);
+  return y1 + int((uint(y0 - y1) * (256u - fac)) >> 8);
+}
+int ds_lin(int y0, int y1, int xv, int xdiff, float rcp) {
+  if (y0 == y1) return y0;
+  if (y0 < y1) return y0 + int(ds_rdiv(uint((y1 - y0) * xv), uint(xdiff), rcp));
+  return y1 + int(ds_rdiv(uint((y0 - y1) * (xdiff - xv)), uint(xdiff), rcp));
+}
+// The DS's own attributes for this pixel: the row's span endpoints from the
+// span table (vk_layout.h, the CPU raster's Slope/Interp output), then the
+// hardware's fixed-point interpolation along the row (kernels_ref.cpp:
+// span_factor, span_attr_persp, lin_at), so colour and texcoords equal the
+// CPU raster's at every pixel the DS draws. A pixel the GPU's coverage
+// reaches past the span reads the nearest endpoint. Equal endpoints (flat
+// colour, most rows) and an untextured polygon's texcoords skip the
+// arithmetic, which under MSAA runs for every edge fragment of this scene's
+// many small polygons. False: no row (the fallback is the hardware's
+// interpolation).
+bool ds_attrs(GpuPoly p, bool textured, out ivec3 rgb, out ivec2 st) {
+  if (p.span_base == DS_SPAN_NONE) return false;
+  int y = int(gl_FragCoord.y), ry0 = max(p.ytop, 0), ry1 = min(p.ybot, 191);
+  if (y < ry0 || y > ry1) return false;
+  uint i = (p.span_base + uint(y - ry0)) * 2u;
+  uvec4 a = spans[i], b = spans[i + 1u];
+  int xstart = int(a.x), xend = int(a.y), wl = int(a.z), wr = int(a.w);
+  ivec3 lrgb = ivec3(b.x & 0x3FFu, (b.x >> 10) & 0x3FFu, (b.x >> 20) & 0x3FFu);
+  ivec2 lst = ivec2(int(b.y << 16) >> 16, int(b.y) >> 16);
+  rgb = lrgb; st = lst;
+  bool do_rgb = b.x != b.z, do_st = textured && b.y != b.w;
+  if (!do_rgb && !do_st) return true;
+  int xdiff = xend + 1 - xstart;
+  if (xdiff <= 0) return true;
+  int xv = clamp(int(gl_FragCoord.x) - xstart, 0, xdiff - 1);
+  ivec3 rrgb = ivec3(b.z & 0x3FFu, (b.z >> 10) & 0x3FFu, (b.z >> 20) & 0x3FFu);
+  ivec2 rst = ivec2(int(b.w << 16) >> 16, int(b.w) >> 16);
+  if (wl == wr && (wl & 0x7F) == 0) {   // linear
+    float rcp = 1.0 / float(xdiff);
+    if (do_rgb) rgb = ivec3(ds_lin(lrgb.r, rrgb.r, xv, xdiff, rcp), ds_lin(lrgb.g, rrgb.g, xv, xdiff, rcp), ds_lin(lrgb.b, rrgb.b, xv, xdiff, rcp));
+    if (do_st) st = ivec2(ds_lin(lst.x, rst.x, xv, xdiff, rcp), ds_lin(lst.y, rst.y, xv, xdiff, rcp));
+    return true;
+  }
+  uint fac;
+  if (wl == wr) fac = (uint(xv) * ds_udiv(1u << 24, uint(xdiff))) >> 16;   // the constant-w ramp
+  else { uint num = uint(xv * wl) << 8, den = uint(xv * wl) + uint((xdiff - xv) * wr); fac = den == 0u ? 0u : ds_udiv(num, den); }
+  if (do_rgb) rgb = ivec3(ds_persp(lrgb.r, rrgb.r, fac), ds_persp(lrgb.g, rrgb.g, fac), ds_persp(lrgb.b, rrgb.b, fac));
+  if (do_st) st = ivec2(ds_persp(lst.x, rst.x, fac), ds_persp(lst.y, rst.y, fac));
+  return true;
+}
+
 void main() {
   GpuPoly p = polys[v_poly];
-  vec3 rgb = clamp(interpolateAtOffset(v_rgb, vec2(-0.5)), vec3(0.0), vec3(511.0));
-#ifdef DS_CENTROID
-  vec2 st = clamp(interpolateAtCentroid(v_st), st_bounds_lo(p), st_bounds_hi(p));
-#else
-  vec2 st = clamp(interpolateAtOffset(v_st, vec2(-0.5)), st_bounds_lo(p), st_bounds_hi(p));
-#endif
+  bool textured = (p.flags & DS_PF_TEXTURED) != 0u;
+  bool filt = textured && (pc.f.flags2 & DS_FF2_TEXFILTER) != 0u;
+  ivec3 rgb9; ivec2 st4; vec2 stf = vec2(0.0);
+  // Above 1x, and for smooth textures, the hardware's interpolation: the span
+  // table's attributes are per DS pixel, and would step at every one.
+  if (pc.f.scale > 1u || filt || !ds_attrs(p, textured, rgb9, st4)) {
+    vec3 rgb = clamp(interpolateAtOffset(v_rgb, vec2(-0.5)), vec3(0.0), vec3(511.0));
+    vec2 st = clamp(interpolateAtOffset(v_st, vec2(-0.5)), st_bounds_lo(p), st_bounds_hi(p));
+    // Texcoords truncate as the DS 12.4 >> 4 does; +0.01 absorbs float error.
+    rgb9 = ivec3(round(rgb)); st4 = ivec2(floor(st + 0.01)); stf = st;
+  }
   uint blendmode = (p.attr >> 4) & 3u;
   uint polyalpha = (p.attr >> 16) & 0x1Fu;
-  bool textured = (p.flags & DS_PF_TEXTURED) != 0u;
-  // Texcoords truncate as the DS 12.4 >> 4 does; +0.01 absorbs float error.
-  uint src;
-  if (textured && (pc.f.flags2 & DS_FF2_TEXFILTER) != 0u)
-    src = shade_texel(p, blendmode, polyalpha, true, int(round(rgb.r)), int(round(rgb.g)), int(round(rgb.b)), tex_rgba_filtered(p, st));
-  else
-    src = shade_pixel(p, blendmode, polyalpha, textured, int(round(rgb.r)), int(round(rgb.g)), int(round(rgb.b)), int(floor(st.x + 0.01)), int(floor(st.y + 0.01)));
+  uint src = filt ? shade_texel(p, blendmode, polyalpha, true, rgb9.r, rgb9.g, rgb9.b, tex_rgba_filtered(p, stf))
+                  : shade_pixel(p, blendmode, polyalpha, textured, rgb9.r, rgb9.g, rgb9.b, st4.x, st4.y);
   uint alpha = src >> 24;
 #ifndef DS_EARLY
   if (alpha <= pc.f.alpha_ref) discard;

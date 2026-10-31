@@ -767,6 +767,7 @@ namespace {
 inline void viewport_vertex(Vertex& vt, const std::array<u32, 6>& viewport) {
   vt.pos[3] &= 0x00FFFFFF;
   u32 px, py;
+  s32 fx = 0, fy = 0;
   const u32 w = static_cast<u32>(vt.pos[3]);
   if (w == 0) { px = 0; py = 0; }
   else {
@@ -775,19 +776,18 @@ inline void viewport_vertex(Vertex& vt, const std::array<u32, 6>& viewport) {
     u32 den = w;
     if (w > 0xFFFF) { px >>= 1; py >>= 1; den >>= 1; }
     den <<= 1;
-    // The sub-pixel position first, from the operands the hardware divides
-    // (64-bit: the 32-bit product below may wrap, and that wrap is the DS's).
-    vt.fx = static_cast<s32>(((static_cast<u64>(px) * viewport[4]) << 6) / den + (static_cast<u64>(viewport[0]) << 6));
-    vt.fy = static_cast<s32>(((static_cast<u64>(py) * viewport[5]) << 6) / den + (static_cast<u64>(viewport[3]) << 6));
+    // The same division at 16x for the GPU raster's fraction, kept only
+    // where its integer part agrees with the hardware's (whose product can wrap).
+    const u64 fpx = (u64{px} * viewport[4] << 4) / den, fpy = (u64{py} * viewport[5] << 4) / den;
     px = ((px * viewport[4]) / den) + viewport[0];
     py = ((py * viewport[5]) / den) + viewport[3];
+    if ((fpx >> 4) + viewport[0] == px) fx = static_cast<s32>(fpx & 15);
+    if ((fpy >> 4) + viewport[3] == py) fy = static_cast<s32>(fpy & 15);
   }
   vt.sx = px & 0x1FF;
   vt.sy = py & 0xFF;
-  // Where the hardware's arithmetic wrapped (or W was 0), the whole-pixel
-  // position is the only one that agrees with it.
-  if (w == 0 || (vt.fx >> 6) != vt.sx) vt.fx = vt.sx << 6;
-  if (w == 0 || (vt.fy >> 6) != vt.sy) vt.fy = vt.sy << 6;
+  vt.fx = (vt.sx << 4) | fx;
+  vt.fy = (vt.sy << 4) | fy;
 }
 
 // 5-bit colour to 9 bits: (c << 4) + 0xF for non-zero components.
@@ -1367,7 +1367,10 @@ void Gpu3D::write(u32 addr, u32 width, u32 value) {
 
 
 namespace {
-template <class S> void sync_vertex(S& s, Vertex& v) { s.fields(v.pos, v.col, v.tex, v.clipped, v.sx, v.sy, v.fcol); }
+template <class S> void sync_vertex(S& s, Vertex& v) {
+  s.fields(v.pos, v.col, v.tex, v.clipped, v.sx, v.sy, v.fcol);
+  if constexpr (S::reading) { v.fx = v.sx << 4; v.fy = v.sy << 4; }   // a loaded frame's vertices draw on whole pixels
+}
 template <class S> void sync_polygon(S& s, Polygon& p) {
   s.fields(p.vtx, p.nverts, p.z, p.w, p.wbuffer, p.attr, p.texparam, p.texpal, p.degenerate, p.facing, p.translucent, p.shadow_mask, p.shadow,
            p.vtop, p.vbot, p.ytop, p.ybot, p.xtop, p.xbot, p.sort_key);

@@ -47,6 +47,7 @@ void Lid::open() {
       ioctl(fd, EVIOCGNAME(sizeof name), name);
       fd_ = fd;
       switch_state(fd_, closed_);
+      shown_ = closed_;
       std::fprintf(stderr, "lid: %s (%s), %s\n", path.c_str(), name, closed_ ? "closed" : "open");
       break;
     }
@@ -63,22 +64,31 @@ void Lid::close() {
 }
 
 bool Lid::poll(bool& closed) {
-  const bool was = closed_;
 #ifdef __linux__
   if (fd_ >= 0) {
     input_event ev;
-    bool any = false;
-    while (read(fd_, &ev, sizeof ev) == static_cast<ssize_t>(sizeof ev)) any = true;
-    if (any) switch_state(fd_, closed_);
+    while (read(fd_, &ev, sizeof ev) == static_cast<ssize_t>(sizeof ev)) {}
+    // Every frame, not just when an event arrived: around a host suspend the
+    // events can land out of step with the switch, and a missed open would
+    // leave the guest asleep for good.
+    switch_state(fd_, closed_);
   }
 #endif
   // No switch (or host froze before the event): clocks drifted >1s apart.
   const s64 skew = clock_ns(CLOCK_BOOTTIME) - clock_ns(CLOCK_MONOTONIC);
-  if (skew - skew_ns_ > 1000000000 && fd_ < 0) { pulse_ = 6; std::fprintf(stderr, "lid: host resumed from suspend; pulsing the lid\n"); }
+  if (skew - skew_ns_ > 1000000000 && fd_ < 0) { pulse_ = 1; std::fprintf(stderr, "lid: host resumed from suspend; pulsing the lid\n"); }
   skew_ns_ = skew;
-  if (pulse_ > 0) { --pulse_; closed = pulse_ > 0; return true; }
-  closed = closed_;
-  return closed_ != was;
+  bool raw = closed_;
+  if (pulse_ > 0) { --pulse_; raw = true; }
+
+  const bool was = shown_;
+  if (raw && !shown_) { shown_ = true; hold_ = kMinClosedFrames; }
+  else if (shown_) {
+    if (hold_ > 0) --hold_;
+    if (!raw && hold_ == 0) shown_ = false;
+  }
+  closed = shown_;
+  return shown_ != was;
 }
 
 } // namespace ds::sdl
