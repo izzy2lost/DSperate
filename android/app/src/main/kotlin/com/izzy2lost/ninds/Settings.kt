@@ -67,7 +67,7 @@ class Settings private constructor(private val file: File) {
     val autoSaveState get() = getBoolean(AUTO_SAVE_STATE, true)
 
     var layoutLandscape: String
-        get() = getString(LAYOUT_LANDSCAPE, ScreenLayout.VERTICAL)
+        get() = getString(LAYOUT_LANDSCAPE, ScreenLayout.HYBRID)
         set(value) = put(LAYOUT_LANDSCAPE, value)
     var layoutPortrait: String
         get() = getString(LAYOUT_PORTRAIT, ScreenLayout.VERTICAL)

@@ -110,7 +110,7 @@
             app:title="@string/pref_layout_portrait"
             app:useSimpleSummaryProvider="true" />
         <ListPreference
-            app:defaultValue="vertical"
+            app:defaultValue="hybrid"
             app:entries="@array/layout_entries"
             app:entryValues="@array/layout_values"
             app:iconSpaceReserved="false"
