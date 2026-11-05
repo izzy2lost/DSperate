@@ -85,6 +85,31 @@ class SettingsActivity : AppCompatActivity() {
             refreshSummaries()
         }
 
+        private val pickGba = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+            if (uris.isNullOrEmpty()) return@registerForActivityResult
+            var n = 0
+            for (uri in uris) {
+                val name = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':') ?: "game.gba"
+                // A GBA ROM has the fixed byte 0x96 at 0xB2 of its header.
+                val ok = runCatching {
+                    val head = ByteArray(0xC0)
+                    requireContext().contentResolver.openInputStream(uri)!!.use { var got = 0; while (got < head.size) { val r = it.read(head, got, head.size - got); if (r < 0) break; got += r } }
+                    require(head[0xB2] == 0x96.toByte())
+                    val file = java.io.File(paths.gba, AppPaths.stemOf(displayName(uri) ?: name) + ".gba")
+                    requireContext().contentResolver.openInputStream(uri)!!.use { input -> file.outputStream().use { input.copyTo(it) } }
+                }.isSuccess
+                if (ok) n++ else toast(getString(R.string.gba_not_gba, displayName(uri) ?: name))
+            }
+            if (n > 0) toast(getString(R.string.gba_imported, n))
+            refreshSummaries()
+        }
+
+        private fun displayName(uri: Uri): String? = runCatching {
+            requireContext().contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        }.getOrNull()
+
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             settings = Settings.get(requireContext())
             paths = AppPaths(requireContext())
@@ -115,6 +140,18 @@ class SettingsActivity : AppCompatActivity() {
                 pickCheatDb.launch(arrayOf("*/*"))
                 true
             }
+            findPreference<Preference>("gba_games")?.setOnPreferenceClickListener {
+                pickGba.launch(arrayOf("*/*"))
+                true
+            }
+            findPreference<Preference>("gba_clear")?.setOnPreferenceClickListener {
+                paths.gbaGames().forEach { it.delete() }
+                toast(R.string.gba_cleared)
+                refreshSummaries()
+                true
+            }
+            // The old anti-aliasing switch becomes the list's "on".
+            findPreference<ListPreference>(Settings.AA_MODE)?.value = settings.aaMode
             findPreference<Preference>("controller_mapping")?.setOnPreferenceClickListener {
                 startActivity(Intent(requireContext(), ControllerMappingActivity::class.java))
                 true
@@ -183,8 +220,11 @@ class SettingsActivity : AppCompatActivity() {
                 findPreference<Preference>(key)?.setOnPreferenceClickListener { action(); true }
             }
             if (!Settings.hasVulkan(requireContext())) {
-                for (key in listOf(Settings.GPU3D, Settings.GPU_SCALE, Settings.TEX_FILTER)) findPreference<Preference>(key)?.isEnabled = false
-                findPreference<Preference>("gpu_scale_note")?.summary = getString(R.string.pref_gpu_needs_vulkan)
+                // OpenGL ES 3.1 still draws GPU 3D, at native resolution only.
+                val gles = Settings.hasGles31(requireContext())
+                for (key in listOf(Settings.GPU_SCALE, Settings.TEX_FILTER)) findPreference<Preference>(key)?.isEnabled = false
+                findPreference<Preference>(Settings.GPU3D)?.isEnabled = gles
+                findPreference<Preference>("gpu_scale_note")?.summary = getString(if (gles) R.string.pref_gpu_gles_only else R.string.pref_gpu_needs_vulkan)
             }
             findPreference<Preference>("about")?.summary = getString(R.string.about_summary, BuildConfig.VERSION_NAME)
             refreshSummaries()
@@ -261,6 +301,7 @@ class SettingsActivity : AppCompatActivity() {
             }
             findPreference<Preference>("import_cheat_db")?.summary =
                 getString(if (paths.cheatDatabase.isFile) R.string.cheat_db_present else R.string.cheat_db_missing)
+            findPreference<Preference>("gba_games")?.summary = getString(R.string.pref_gba_games_summary, paths.gbaGames().size)
             findPreference<Preference>("rom_folder")?.summary = settings.romTreeUri.takeIf { it.isNotEmpty() }
                 ?.let { Uri.decode(Uri.parse(it).lastPathSegment ?: it) } ?: getString(R.string.rom_folder_none)
         }

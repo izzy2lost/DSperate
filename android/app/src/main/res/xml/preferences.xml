@@ -41,12 +41,19 @@
             app:key="tex_filter"
             app:summary="@string/pref_tex_filter_summary"
             app:title="@string/pref_tex_filter" />
-        <SwitchPreferenceCompat
-            app:defaultValue="false"
+        <ListPreference
+            app:defaultValue="off"
+            app:entries="@array/aa_entries"
+            app:entryValues="@array/aa_values"
             app:iconSpaceReserved="false"
-            app:key="anti_aliasing"
-            app:summary="@string/pref_aa_summary"
-            app:title="@string/pref_aa" />
+            app:key="aa_mode"
+            app:title="@string/pref_aa"
+            app:useSimpleSummaryProvider="true" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="aa_note"
+            app:selectable="false"
+            app:summary="@string/pref_aa_note" />
         <ListPreference
             app:defaultValue="-1"
             app:entries="@array/frameskip_entries"
@@ -261,11 +268,43 @@
             app:iconSpaceReserved="false"
             app:key="stick_as_dpad"
             app:title="@string/pref_stick_dpad" />
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="analog_controls"
+            app:summary="@string/pref_analog_summary"
+            app:title="@string/pref_analog" />
         <Preference
             app:iconSpaceReserved="false"
             app:key="controller_mapping"
             app:summary="@string/pref_controller_mapping_summary"
             app:title="@string/pref_controller_mapping" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="@string/pref_cat_slot2" app:iconSpaceReserved="false">
+        <ListPreference
+            app:defaultValue="auto"
+            app:entries="@array/rumble_entries"
+            app:entryValues="@array/rumble_values"
+            app:iconSpaceReserved="false"
+            app:key="rumble"
+            app:title="@string/pref_rumble"
+            app:useSimpleSummaryProvider="true" />
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="guitar_grip"
+            app:summary="@string/pref_guitar_grip_summary"
+            app:title="@string/pref_guitar_grip" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="gba_games"
+            app:title="@string/pref_gba_games" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="gba_clear"
+            app:summary="@string/pref_gba_clear_summary"
+            app:title="@string/pref_gba_clear" />
     </PreferenceCategory>
 
     <PreferenceCategory app:title="@string/pref_cat_cheevos" app:iconSpaceReserved="false">

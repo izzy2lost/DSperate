@@ -1,5 +1,6 @@
 package com.izzy2lost.ninds
 
+import android.app.ActivityManager
 import android.content.Context
 import android.content.pm.PackageManager
 import androidx.preference.PreferenceDataStore
@@ -54,7 +55,10 @@ class Settings private constructor(private val file: File) {
     val jit get() = getBoolean(JIT, true)
     val fastTiming get() = getBoolean(FAST_TIMING, true)
     val gpu3d get() = getBoolean(GPU3D, false)
-    val antiAliasing get() = getBoolean(ANTI_ALIASING, false)
+    /** off, on or enhanced (the edge cut). Before this list it was the ANTI_ALIASING switch. */
+    val aaMode get() = getString(AA_MODE, if (getBoolean(ANTI_ALIASING, false)) "on" else "off")
+    /** For nativeBoot: 0 off, 1 on, 2 enhanced. */
+    val aaLevel get() = when (aaMode) { "on" -> 1; "enhanced" -> 2; else -> 0 }
     val texFilter get() = getBoolean(TEX_FILTER, false)
     val gpuScale get() = getString(GPU_SCALE, "1").toIntOrNull()?.coerceIn(1, 8) ?: 1
     val firmwareBoot get() = getBoolean(FIRMWARE_BOOT, false)
@@ -95,6 +99,14 @@ class Settings private constructor(private val file: File) {
     val controlsScale get() = getInt(CONTROLS_SCALE, 100)
     val haptics get() = getBoolean(HAPTICS, true)
     val stickAsDpad get() = getBoolean(STICK_AS_DPAD, true)
+    val analogControls get() = getBoolean(ANALOG_CONTROLS, true)
+
+    /** auto (when something can vibrate), on or off. */
+    val rumble get() = getString(RUMBLE, "auto")
+    val guitarGrip get() = getBoolean(GUITAR_GRIP, true)
+    /** The GBA game a DS game was given for slot 2: a file name in AppPaths.gba, NO_GBA, or "" (never asked). */
+    fun gbaFor(stem: String) = getString(GBA_PREFIX + stem, "")
+    fun setGbaFor(stem: String, value: String) = put(GBA_PREFIX + stem, value)
 
     val nickname get() = getString(NICKNAME, "NinDS")
     val message get() = getString(MESSAGE, "")
@@ -112,7 +124,7 @@ class Settings private constructor(private val file: File) {
      * achievements, the console's owner settings). A change shows up here as a different string.
      */
     fun bootFingerprint(): String = listOf(
-        jit, fastTiming, gpu3d, gpuScale, texFilter, antiAliasing, firmwareBoot, netMode, lanAddress,
+        jit, fastTiming, gpu3d, gpuScale, texFilter, aaMode, rumble, guitarGrip, analogControls, firmwareBoot, netMode, lanAddress,
         cheevosEnabled, cheevosUser, cheevosToken, nickname, message, birthdayMonth, birthdayDay, favouriteColour, language,
     ).joinToString("|")
 
@@ -156,6 +168,12 @@ class Settings private constructor(private val file: File) {
         const val FAST_TIMING = "fast_timing"
         const val GPU3D = "gpu3d"
         const val ANTI_ALIASING = "anti_aliasing"
+        const val AA_MODE = "aa_mode"
+        const val RUMBLE = "rumble"
+        const val GUITAR_GRIP = "guitar_grip"
+        const val ANALOG_CONTROLS = "analog_controls"
+        const val GBA_PREFIX = "gba_slot_"
+        const val NO_GBA = "none"
         const val GPU_SCALE = "gpu_scale"
         const val TEX_FILTER = "tex_filter"
         const val FIRMWARE_BOOT = "firmware_boot"
@@ -220,5 +238,12 @@ class Settings private constructor(private val file: File) {
          */
         fun hasVulkan(context: Context): Boolean =
             context.packageManager.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION, 0x401000)
+
+        /** OpenGL ES 3.1, which the GPU 3D renderer falls back to without Vulkan (native resolution only). */
+        fun hasGles31(context: Context): Boolean =
+            (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).deviceConfigurationInfo.reqGlEsVersion >= 0x30001
+
+        /** GPU 3D at all: on Vulkan, or on OpenGL ES 3.1 at native resolution. */
+        fun hasGpu3d(context: Context) = hasVulkan(context) || hasGles31(context)
     }
 }

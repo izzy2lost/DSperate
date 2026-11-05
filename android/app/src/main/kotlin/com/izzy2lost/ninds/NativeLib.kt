@@ -27,7 +27,11 @@ object NativeLib {
         gpu3d: Boolean,
         gpuScale: Int,
         texFilter: Boolean,
-        antiAliasing: Boolean,
+        /** 0 off, 1 on, 2 enhanced (the edge cut). */
+        antiAliasing: Int,
+        rumble: Boolean,
+        guitarGrip: Boolean,
+        analog: Boolean,
         netMode: String,
         lanAddress: String,
         audio: Boolean,
@@ -87,8 +91,32 @@ object NativeLib {
     /** Top screen above bottom, 256x384 opaque ARGB. */
     external fun nativeGetFrame(): IntArray?
     external fun nativeSetCheats(names: Array<String>, words: Array<IntArray>)
-    /** {name, description, code} triples; a single element is an error message. */
+    /** {name, description, code} triples, the built-in analog controls codes first; a single element is an error message. */
     external fun nativeDatabaseCheats(dbPath: String): Array<String>
+
+    /** A GBA game into slot 2 (empty paths: none). Empty on success, else why not. */
+    external fun nativeSetSlot2Gba(rom: String, save: String): String
+    /** What is in slot 2: [SLOT2_EMPTY], [SLOT2_GBA], [SLOT2_RUMBLE] or [SLOT2_GRIP]. */
+    external fun nativeSlot2Kind(): Int
+    /** Whether the running game reads a GBA game in slot 2. */
+    external fun nativeReadsGba(): Boolean
+    /** The GBA ROMs among [paths] that the running game reads. */
+    external fun nativeGbaOffers(paths: Array<String>): Array<String>
+    /** Rumble Pak motor changes so far; a change is a pulse. */
+    external fun nativeRumbleEvents(): Int
+    /** Guitar Grip frets held: green 1, red 2, yellow 4, blue 8. */
+    external fun nativeSetFrets(mask: Int)
+    external fun nativeStrum()
+    /** Bits 0-1: 0 no analog controls cheat running, 1 one is, 2 several are on at once; bit 2 ([ANALOG_FULL]): it takes the right stick and ZL / ZR too. */
+    external fun nativeAnalogState(): Int
+    /** Sticks in -32768..32767 (y down), and ZL / ZR. */
+    external fun nativeSetAnalog(lx: Int, ly: Int, rx: Int, ry: Int, zl: Boolean, zr: Boolean)
+
+    const val ANALOG_FULL = 4
+    const val SLOT2_EMPTY = 0
+    const val SLOT2_GBA = 1
+    const val SLOT2_RUMBLE = 2
+    const val SLOT2_GRIP = 3
 }
 
 /** Bit numbers of the DS keypad, as the core's Io::Button enum numbers them. */

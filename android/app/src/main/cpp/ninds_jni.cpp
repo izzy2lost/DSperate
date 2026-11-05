@@ -81,7 +81,7 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void*) {
 
 JNI_FN(jstring, nativeBoot)(JNIEnv* env, jobject, jint rom_fd, jstring rom_name, jstring save_path, jstring cache_dir,
                             jstring bios_dir, jboolean firmware_boot, jboolean jit, jboolean fast_timing, jboolean gpu3d,
-                            jint gpu_scale, jboolean tex_filter, jboolean aa, jstring net_mode, jstring lan_address, jboolean audio, jint volume, jstring nickname, jstring message,
+                            jint gpu_scale, jboolean tex_filter, jint aa, jboolean rumble, jboolean guitar_grip, jboolean analog, jstring net_mode, jstring lan_address, jboolean audio, jint volume, jstring nickname, jstring message,
                             jint birthday_month, jint birthday_day, jint colour, jint language, jstring cheevos_user, jstring cheevos_token) {
   if (g_session) { g_session->stop(); g_session.reset(); }
   ninds::SessionConfig cfg;
@@ -97,6 +97,9 @@ JNI_FN(jstring, nativeBoot)(JNIEnv* env, jobject, jint rom_fd, jstring rom_name,
   cfg.gpu_scale = gpu_scale;
   cfg.tex_filter = tex_filter;
   cfg.aa = aa;
+  cfg.rumble = rumble;
+  cfg.guitar_grip = guitar_grip;
+  cfg.analog = analog;
   cfg.net_mode = str(env, net_mode);
   cfg.lan_address = str(env, lan_address);
   cfg.audio = audio;
@@ -286,4 +289,34 @@ JNI_FN(jobjectArray, nativeDatabaseCheats)(JNIEnv* env, jobject, jstring db_path
     }
   }
   return out;
+}
+
+// ---- Slot 2, the Guitar Grip and analog controls ----------------------------------------------
+
+// A GBA game into slot 2 (empty rom: none); "" on success, else why not.
+JNI_FN(jstring, nativeSetSlot2Gba)(JNIEnv* env, jobject, jstring rom, jstring save) {
+  auto* s = session();
+  return jstr(env, s ? s->set_slot2_gba(str(env, rom), str(env, save)) : "No game is running");
+}
+JNI_FN(jint, nativeSlot2Kind)(JNIEnv*, jobject) { auto* s = session(); return s ? s->slot2_kind() : 0; }
+JNI_FN(jboolean, nativeReadsGba)(JNIEnv*, jobject) { auto* s = session(); return s && s->reads_gba(); }
+// The GBA ROMs among `paths` that the game in slot 1 reads.
+JNI_FN(jobjectArray, nativeGbaOffers)(JNIEnv* env, jobject, jobjectArray paths) {
+  std::vector<std::string> in;
+  const jsize n = paths ? env->GetArrayLength(paths) : 0;
+  for (jsize i = 0; i < n; ++i) {
+    auto p = static_cast<jstring>(env->GetObjectArrayElement(paths, i));
+    in.push_back(str(env, p));
+    env->DeleteLocalRef(p);
+  }
+  auto* s = session();
+  return jstrings(env, s ? s->gba_offers(in) : std::vector<std::string>{});
+}
+JNI_FN(jint, nativeRumbleEvents)(JNIEnv*, jobject) { auto* s = session(); return s ? static_cast<jint>(s->rumble_events()) : 0; }
+JNI_FN(void, nativeSetFrets)(JNIEnv*, jobject, jint mask) { if (auto* s = session()) s->set_frets(mask); }
+JNI_FN(void, nativeStrum)(JNIEnv*, jobject) { if (auto* s = session()) s->strum(); }
+JNI_FN(jint, nativeAnalogState)(JNIEnv*, jobject) { auto* s = session(); return s ? s->analog_state() : 0; }
+// Sticks in SDL's range (-32768..32767, y down), and ZL/ZR.
+JNI_FN(void, nativeSetAnalog)(JNIEnv*, jobject, jint lx, jint ly, jint rx, jint ry, jboolean zl, jboolean zr) {
+  if (auto* s = session()) s->set_analog(lx, ly, rx, ry, zl, zr);
 }

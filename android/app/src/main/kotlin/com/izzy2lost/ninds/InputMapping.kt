@@ -4,7 +4,7 @@ import android.view.InputDevice
 import android.view.KeyEvent
 
 /** Everything a physical button can be bound to: the DS keypad, then emulator hotkeys. */
-enum class InputAction(val label: String, val dsBit: Int = -1) {
+enum class InputAction(val label: String, val dsBit: Int = -1, val fret: Int = -1) {
     A("A", DsButton.A),
     B("B", DsButton.B),
     X("X", DsButton.X),
@@ -25,9 +25,17 @@ enum class InputAction(val label: String, val dsBit: Int = -1) {
     QUICK_LOAD("Quick load"),
     MICROPHONE("Blow into microphone"),
     LID("Close / open lid"),
-    SCREENSHOT("Screenshot");
+    SCREENSHOT("Screenshot"),
+    // The Guitar Grip (Guitar Hero: On Tour, Band Hero). Only while it is in the GBA slot,
+    // when these win over whatever else the same key does.
+    GRIP_GREEN("Guitar Grip: green fret", fret = 0),
+    GRIP_RED("Guitar Grip: red fret", fret = 1),
+    GRIP_YELLOW("Guitar Grip: yellow fret", fret = 2),
+    GRIP_BLUE("Guitar Grip: blue fret", fret = 3),
+    STRUM("Guitar Grip: strum");
 
     val isDsButton get() = dsBit >= 0
+    val isGrip get() = fret >= 0 || this == STRUM
     val settingsKey get() = "map_" + name.lowercase()
 }
 
@@ -61,11 +69,17 @@ class InputMapping(private val settings: Settings) {
 
     fun actionsFor(keyCode: Int): List<InputAction> = byKey[keyCode].orEmpty()
 
+    /** With the Guitar Grip in: a key bound to the grip does only that. Without it, the grip's bindings do nothing. */
+    fun actionsFor(keyCode: Int, grip: Boolean): List<InputAction> {
+        val all = actionsFor(keyCode)
+        return if (grip && all.any { it.isGrip }) all.filter { it.isGrip } else all.filter { !it.isGrip }
+    }
+
     fun keysFor(action: InputAction): Set<Int> = bindings[action].orEmpty()
 
-    /** Binds `keyCode` to `action` alone: a key does one thing. */
+    /** Binds `keyCode` to `action` alone: a key does one thing (one grip thing, and one other thing). */
     fun bind(action: InputAction, keyCode: Int) {
-        for ((other, keys) in bindings) if (other != action && keys.remove(keyCode)) save(other)
+        for ((other, keys) in bindings) if (other != action && other.isGrip == action.isGrip && keys.remove(keyCode)) save(other)
         bindings.getOrPut(action) { mutableSetOf() } += keyCode
         save(action)
         rebuild()
@@ -107,6 +121,12 @@ class InputMapping(private val settings: Settings) {
             InputAction.MICROPHONE to setOf(KeyEvent.KEYCODE_BUTTON_THUMBR, KeyEvent.KEYCODE_M),
             InputAction.LID to setOf(KeyEvent.KEYCODE_F3),
             InputAction.SCREENSHOT to setOf(KeyEvent.KEYCODE_F12),
+            // As the desktop frontend: frets on the shoulders and triggers, strum on the d-pad.
+            InputAction.GRIP_GREEN to setOf(KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_1),
+            InputAction.GRIP_RED to setOf(KeyEvent.KEYCODE_BUTTON_L2, KeyEvent.KEYCODE_2),
+            InputAction.GRIP_YELLOW to setOf(KeyEvent.KEYCODE_BUTTON_R2, KeyEvent.KEYCODE_3),
+            InputAction.GRIP_BLUE to setOf(KeyEvent.KEYCODE_BUTTON_R1, KeyEvent.KEYCODE_4),
+            InputAction.STRUM to setOf(KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_SPACE),
         )
 
         fun keyName(keyCode: Int): String =

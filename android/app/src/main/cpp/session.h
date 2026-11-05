@@ -10,6 +10,7 @@
 #include "presenter_gl.h"
 
 #include "core/io/dsi_nand_persist.h"
+#include "core/input/input_log.h"
 #include "core/nds.h"
 
 #include <atomic>
@@ -40,7 +41,14 @@ struct SessionConfig {
   bool gpu3d = false;
   int gpu_scale = 1;            // 3D internal resolution (1-8); above 1 implies the GPU raster
   bool tex_filter = false;      // bilinear texture filtering; implies the GPU raster
-  bool aa = false;
+  // 0 off, 1 on (4x MSAA on the GPU raster, the hardware's blend on the CPU),
+  // 2 enhanced: the edge cut on the GPU raster at 1x (core/gpu/edge_cut.h), MSAA above.
+  int aa = 0;
+  // Slot 2 when no GBA game is inserted (set_slot2_gba): the Guitar Grip
+  // for the Guitar Hero games, else the Rumble Pak when `rumble`.
+  bool rumble = false;
+  bool guitar_grip = true;
+  bool analog = true;           // feed the sticks to an enabled CPAD analog-controls cheat
   // off, internet (Wiimmfi), or local wireless: auto (join a session heard on the
   // LAN, else host one), host, guest (join only), join (lan_address).
   std::string net_mode = "off";
@@ -90,9 +98,33 @@ public:
   std::string save_state(const std::string& path);
   std::string load_state(const std::string& path);
   void reset();
+  // The enabled codes. Codes from earlier calls that are missing now are kept,
+  // switched off, so an analog patch's hook is taken out of guest memory.
   void set_cheats(std::vector<CheatItem> enabled);
+  // Bits 0-1: 0 no analog patch running, 1 one is (the sticks reach it), 2 several are
+  // enabled at once (they fight); bit 2: the patch takes the second stick and ZL/ZR too.
+  int analog_state() const { return analog_state_.load(std::memory_order_relaxed); }
+  void set_analog(int lx, int ly, int rx, int ry, bool zl, bool zr) {
+    analog_[0].store(static_cast<int16_t>(lx), std::memory_order_relaxed); analog_[1].store(static_cast<int16_t>(ly), std::memory_order_relaxed);
+    analog_[2].store(static_cast<int16_t>(rx), std::memory_order_relaxed); analog_[3].store(static_cast<int16_t>(ry), std::memory_order_relaxed);
+    analog_zlzr_.store((zl ? 1 : 0) | (zr ? 2 : 0), std::memory_order_relaxed);
+  }
+  // Slot 2. A GBA game (its ROM and save paths; empty: none, and slot 2
+  // goes back to the grip or the Rumble Pak). Before start(), or between frames.
+  std::string set_slot2_gba(const std::string& rom, const std::string& save);
+  // 0 empty, 1 a GBA game, 2 the Rumble Pak, 3 the Guitar Grip.
+  int slot2_kind() const { return slot2_kind_.load(std::memory_order_relaxed); }
+  // Whether the game in slot 1 reads GBA games, and which of `paths` (GBA ROMs) it accepts.
+  bool reads_gba() const;
+  std::vector<std::string> gba_offers(const std::vector<std::string>& paths) const;
+  // Rumble Pak motor changes so far (the UI turns a change into a pulse).
+  uint32_t rumble_events() const { return rumble_events_.load(std::memory_order_relaxed); }
+  // Guitar Grip: the frets held (green 1, red 2, yellow 4, blue 8), and a strum (a stroke across the touch screen).
+  void set_frets(int mask) { frets_.store(mask & 15, std::memory_order_relaxed); }
+  void strum() { strums_.fetch_add(1, std::memory_order_relaxed); }
   bool flush_save();
   // The game's cheats from an R4 usrcheat.dat, for the current cart.
+  // With the built-in analog controls codes for the game ahead of them (also when db_path is empty or missing).
   std::vector<CheatItem> database_cheats(const std::string& db_path, std::string& err);
 
   double fps() const { return fps_.load(std::memory_order_relaxed); }
@@ -115,6 +147,10 @@ private:
   void post(std::function<void()> job, bool wait);
   void drain_jobs();
   void write_save();
+  void write_gba_save();
+  void fill_slot2(const std::string& rom, const std::string& save);
+  void refresh_analog();
+  void strum_frame(ds::input::Frame& f);
   std::string boot_dsiware(ds::NDS& nds);
   void export_dsi_saves();
   void run_net_frame(ds::NDS& nds);
@@ -149,8 +185,16 @@ private:
   std::atomic<bool> lid_{false}, mic_{false}, ff_{false}, audio_on_{true};
   std::atomic<int> ff_speed_{3}, frameskip_{0}, shown_{3}, mic_mode_{1};
   std::atomic<double> fps_{0.0};
+  std::atomic<int16_t> analog_[4] = {};
+  std::atomic<int> analog_zlzr_{0}, analog_state_{0}, slot2_kind_{0}, frets_{0}, strums_{0};
+  std::atomic<uint32_t> rumble_events_{0};
 
   // Emulator thread only.
+  std::string gba_save_;          // the GBA game's save file, when one is in slot 2
+  uint32_t gba_writes_seen_ = 0;
+  int gba_quiet_frames_ = 0;
+  int strums_seen_ = 0, strum_step_ = 0;
+  bool strum_up_ = false, strum_queued_ = false;
   uint32_t last_sram_writes_ = 0;
   int sram_quiet_frames_ = 0;
   // DSiWare: its saves live on the made-up NAND and go out as files once its writes go quiet.

@@ -17,6 +17,9 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.Process
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.provider.MediaStore
 import android.text.format.DateUtils
 import android.view.InputDevice
@@ -83,10 +86,27 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
     private var fastForward = false
     private var fastForwardHeld = false
     private var lidClosed = false
+    // What is in the GBA slot (NativeLib.SLOT2_*), and the analog controls cheat's state (nativeAnalogState).
+    private var slot2Kind = NativeLib.SLOT2_EMPTY
+    private var analogState = 0
+    private val gripActive get() = slot2Kind == NativeLib.SLOT2_GRIP
+    private val analogActive get() = (analogState and 3) != 0
+    private var lastPadId = -1          // the controller last used, whose motor the Rumble Pak drives
+    private var rumbleSeen = 0
 
     private var cheevoPopups: Achievements.Popups? = null
     /** The boot-time settings this session started with (Settings.bootFingerprint). */
     private var bootFingerprint = ""
+
+    // The Rumble Pak's motor, polled: each change since the last look is a short pulse.
+    private val rumbleTicker = object : Runnable {
+        override fun run() {
+            if (!booted || slot2Kind != NativeLib.SLOT2_RUMBLE) return
+            val n = NativeLib.nativeRumbleEvents()
+            if (n != rumbleSeen) { rumbleSeen = n; if (!controls.suspended) vibrate(40) }
+            handler.postDelayed(this, 16)
+        }
+    }
 
     private val fpsTicker = object : Runnable {
         override fun run() {
@@ -156,12 +176,15 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
                 val pfd = contentResolver.openFileDescriptor(uri, "r") ?: return@runCatching getString(R.string.error_open_rom)
                 romFd = pfd
                 bootFingerprint = settings.bootFingerprint()
-                // The GPU options stay off without Vulkan, even if set before (or restored from a backup).
+                // Higher resolutions and smooth textures need Vulkan, even if set before (or restored
+                // from a backup); without it GPU 3D runs on OpenGL ES 3.1 at native resolution.
                 val vulkan = Settings.hasVulkan(this)
+                val gpu = vulkan || Settings.hasGles31(this)
                 NativeLib.nativeBoot(
                     pfd.fd, fileName, paths.savFile(stem).path, paths.cache.path, paths.bios.path,
                     settings.firmwareBoot, settings.jit, settings.fastTiming,
-                    vulkan && settings.gpu3d, if (vulkan) settings.gpuScale else 1, vulkan && settings.texFilter, settings.antiAliasing,
+                    gpu && settings.gpu3d, if (vulkan) settings.gpuScale else 1, vulkan && settings.texFilter, settings.aaLevel,
+                    rumbleWanted(), settings.guitarGrip, settings.analogControls,
                     settings.netMode, settings.lanAddress, settings.audio, settings.volume, settings.nickname, settings.message,
                     settings.birthdayMonth, settings.birthdayDay, settings.favouriteColour, settings.language,
                     if (settings.cheevosEnabled) settings.cheevosUser else "", if (settings.cheevosEnabled) settings.cheevosToken else "",
@@ -169,6 +192,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
             }.getOrElse { it.message ?: getString(R.string.error_open_rom) }
             var stateMessage: String? = null
             if (error.isEmpty()) {
+                // The GBA game picked for this one before, in before anything runs.
+                gbaChoice()?.let { NativeLib.nativeSetSlot2Gba(it.path, paths.gbaSave(it).path) }
                 cheatStore.apply(cheatStore.load())
                 if (loadSlot >= 0) {
                     val slot = SaveStateSlot(paths.stateDir(stem), loadSlot)
@@ -190,9 +215,26 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
                 .show()
             return
         }
+        // A game that reads GBA games looks for one in its first frames: asked before it runs,
+        // once (the answer is kept per game), when some it reads are imported.
+        if (settings.gbaFor(stem).isEmpty() && NativeLib.nativeReadsGba()) {
+            val offers = gbaOffers()
+            if (offers.isNotEmpty()) {
+                binding.bootOverlay.visibility = View.GONE
+                pickGba(offers, MaterialAlertDialogBuilder(this)) { startRunning(stateMessage) }.show()
+                return
+            }
+        }
+        startRunning(stateMessage)
+    }
+
+    private fun startRunning(stateMessage: String?) {
+        if (isFinishing || isDestroyed) return
         booted = true
         binding.bootOverlay.visibility = View.GONE
         applyRuntimeSettings()
+        refreshSlot2()
+        analogState = NativeLib.nativeAnalogState()
         NativeLib.nativeStart()
         if (surfaceReady) NativeLib.nativeSetSurface(NativeLib.MAIN_DISPLAY, binding.surface.holder.surface)
         secondSurface?.let { NativeLib.nativeSetSurface(NativeLib.SECOND_DISPLAY, it) }
@@ -208,6 +250,91 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         }
         cheevoPopups = Achievements.Popups(this, binding.root)
         handler.post(fpsTicker)
+    }
+
+    // ---- The GBA slot, rumble and analog controls -------------------------------------------
+
+    /** The imported GBA game this game was given, if it is still there. */
+    private fun gbaChoice(): File? {
+        val name = settings.gbaFor(stem)
+        if (name.isEmpty() || name == Settings.NO_GBA) return null
+        return File(paths.gba, name).takeIf { it.isFile }
+    }
+
+    private fun gbaOffers(): List<File> =
+        NativeLib.nativeGbaOffers(paths.gbaGames().map { it.path }.toTypedArray()).map { File(it) }
+
+    /** The cartridge picker: the imported GBA games this game reads, or none. [then] runs after a choice. */
+    private fun pickGba(offers: List<File>, builder: MaterialAlertDialogBuilder, then: () -> Unit): AlertDialog {
+        val current = gbaChoice()
+        val names = offers.map { it.name.substringBeforeLast('.') } + getString(R.string.gba_none)
+        val checked = offers.indexOfFirst { it == current }.let { if (it < 0) offers.size else it }
+        return builder
+            .setTitle(R.string.gba_pick_title)
+            .setSingleChoiceItems(names.toTypedArray(), checked) { d, which ->
+                val rom = offers.getOrNull(which)
+                settings.setGbaFor(stem, rom?.name ?: Settings.NO_GBA)
+                val msg = NativeLib.nativeSetSlot2Gba(rom?.path ?: "", rom?.let { paths.gbaSave(it).path } ?: "")
+                if (msg.isNotEmpty()) Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                d.dismiss()
+                then()
+            }
+            .setOnCancelListener { if (settings.gbaFor(stem).isEmpty()) settings.setGbaFor(stem, Settings.NO_GBA); then() }
+            .create()
+    }
+
+    /** From the menu: a new cartridge takes a console reset, as on the hardware. */
+    private fun showGbaPicker() {
+        val offers = gbaOffers()
+        if (offers.isEmpty()) {
+            present(MaterialAlertDialogBuilder(this).setTitle(R.string.gba_pick_title).setMessage(R.string.gba_none_imported)
+                .setPositiveButton(android.R.string.ok, null).create())
+            return
+        }
+        val before = gbaChoice()
+        present(pickGba(offers, MaterialAlertDialogBuilder(this)) {
+            if (gbaChoice() != before) { NativeLib.nativeReset(); refreshSlot2(); Toast.makeText(this, R.string.gba_restart, Toast.LENGTH_SHORT).show() }
+        })
+    }
+
+    private fun refreshSlot2() {
+        slot2Kind = NativeLib.nativeSlot2Kind()
+        NativeLib.nativeSetFrets(0)
+        handler.removeCallbacks(rumbleTicker)
+        if (slot2Kind == NativeLib.SLOT2_RUMBLE) { rumbleSeen = NativeLib.nativeRumbleEvents(); handler.post(rumbleTicker) }
+    }
+
+    /** Whether the Rumble Pak goes in: always, never, or when the device or a controller can vibrate. */
+    private fun rumbleWanted(): Boolean = when (settings.rumble) {
+        "on" -> true
+        "off" -> false
+        else -> phoneVibrator()?.hasVibrator() == true ||
+            InputDevice.getDeviceIds().any { id -> InputDevice.getDevice(id)?.let { InputMapping.isGamepad(it) && padVibrator(it)?.hasVibrator() == true } == true }
+    }
+
+    private fun phoneVibrator(): Vibrator? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) getSystemService(VibratorManager::class.java)?.defaultVibrator
+        else @Suppress("DEPRECATION") getSystemService(Vibrator::class.java)
+
+    private fun padVibrator(device: InputDevice): Vibrator? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) device.vibratorManager.defaultVibrator
+        else @Suppress("DEPRECATION") device.vibrator
+
+    /** The controller in use rumbles when it can, else the device itself. */
+    private fun vibrate(ms: Long) {
+        val pad = InputDevice.getDevice(lastPadId)?.let { padVibrator(it) }?.takeIf { it.hasVibrator() }
+        val v = pad ?: phoneVibrator()?.takeIf { it.hasVibrator() } ?: return
+        runCatching { v.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE)) }
+    }
+
+    /** After the cheats change: whether an analog controls cheat now has the sticks. */
+    private fun refreshAnalog() {
+        val was = analogState and 3
+        analogState = NativeLib.nativeAnalogState()
+        val now = analogState and 3
+        if (now != was && now == 1) Toast.makeText(this, R.string.analog_on, Toast.LENGTH_SHORT).show()
+        if (now == 2 && was != 2) Toast.makeText(this, R.string.analog_conflict, Toast.LENGTH_LONG).show()
+        if (now == 0) NativeLib.nativeSetAnalog(0, 0, 0, 0, false, false)
     }
 
     // ---- Lifecycle ------------------------------------------------------------------------
@@ -360,7 +487,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         val paused = !booted || activityPaused || (dialogHolds > 0 && !inLanSession)
         controls.suspended = paused
         if (booted) NativeLib.nativeSetPaused(paused)
-        if (paused) { heldKeys.clear(); padMask = 0; stickMask = 0; touchMask = 0; pushButtons() }
+        if (paused) {
+            heldKeys.clear(); padMask = 0; stickMask = 0; touchMask = 0; pushButtons()
+            if (booted) { NativeLib.nativeSetFrets(0); NativeLib.nativeSetAnalog(0, 0, 0, 0, false, false) }
+        }
     }
 
     // ---- Surface and layout -----------------------------------------------------------------
@@ -451,7 +581,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
             return super.dispatchKeyEvent(event)
         }
         if (currentDialog != null || !booted) return super.dispatchKeyEvent(event)
-        val actions = mapping.actionsFor(code)
+        if (InputMapping.isGamepad(event.device)) lastPadId = event.deviceId
+        val actions = mapping.actionsFor(code, gripActive)
         if (actions.isEmpty()) {
             // An unbound gamepad B still reads as Back to Android; treat Back as the menu key.
             if (code == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) showMenu()
@@ -470,7 +601,12 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
 
     private fun recomputePadMask() {
         var m = 0
-        for (k in heldKeys) for (a in mapping.actionsFor(k)) if (a.isDsButton) m = m or (1 shl a.dsBit)
+        var frets = 0
+        for (k in heldKeys) for (a in mapping.actionsFor(k, gripActive)) {
+            if (a.isDsButton) m = m or (1 shl a.dsBit)
+            if (a.fret >= 0) frets = frets or (1 shl a.fret)
+        }
+        if (gripActive) NativeLib.nativeSetFrets(frets)
         // Start + Select together opens the menu, for pads without a spare button to bind it to.
         // The held keys are dropped so the game sees both released and the combo fires once.
         val combo = (1 shl DsButton.START) or (1 shl DsButton.SELECT)
@@ -488,17 +624,36 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
     // Analog triggers arrive as axes on many pads; they act like the L2/R2 keys.
     private var triggerL = false
     private var triggerR = false
+    private var hatStrumUp = false
+    private var hatStrumDown = false
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
         val joystick = event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
         if (!joystick || event.action != MotionEvent.ACTION_MOVE || !booted || currentDialog != null) {
             return super.dispatchGenericMotionEvent(event)
         }
+        if (InputMapping.isGamepad(event.device)) lastPadId = event.deviceId
         val hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X)
-        val hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
+        var hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
+        // A d-pad reported as a hat strums like the d-pad keys while the grip is in (when strum is bound there).
+        if (gripActive) {
+            val up = hatY <= -0.5f
+            val dn = hatY >= 0.5f
+            if (up != hatStrumUp) { hatStrumUp = up; if (InputAction.STRUM in mapping.actionsFor(KeyEvent.KEYCODE_DPAD_UP, true)) synthesizeKey(KeyEvent.KEYCODE_DPAD_UP, up) }
+            if (dn != hatStrumDown) { hatStrumDown = dn; if (InputAction.STRUM in mapping.actionsFor(KeyEvent.KEYCODE_DPAD_DOWN, true)) synthesizeKey(KeyEvent.KEYCODE_DPAD_DOWN, dn) }
+            if (InputAction.STRUM in mapping.actionsFor(KeyEvent.KEYCODE_DPAD_UP, true) || InputAction.STRUM in mapping.actionsFor(KeyEvent.KEYCODE_DPAD_DOWN, true)) hatY = 0f
+        }
+        // An analog controls cheat has the sticks (and, its nub variant, the right stick and ZL/ZR).
+        val full = (analogState and NativeLib.ANALOG_FULL) != 0
+        if (analogActive) {
+            fun axis(a: Int) = (event.getAxisValue(a).coerceIn(-1f, 1f) * 32767f).toInt()
+            val zl = maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE)) > 0.5f
+            val zr = maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS)) > 0.5f
+            NativeLib.nativeSetAnalog(axis(MotionEvent.AXIS_X), axis(MotionEvent.AXIS_Y), axis(MotionEvent.AXIS_Z), axis(MotionEvent.AXIS_RZ), zl, zr)
+        }
         var x = hatX
         var y = hatY
-        if (settings.stickAsDpad && abs(hatX) < 0.5f && abs(hatY) < 0.5f) {
+        if (settings.stickAsDpad && !analogActive && abs(hatX) < 0.5f && abs(hatY) < 0.5f) {
             x = event.getAxisValue(MotionEvent.AXIS_X)
             y = event.getAxisValue(MotionEvent.AXIS_Y)
         }
@@ -509,15 +664,16 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         if (y >= 0.5f) m = m or (1 shl DsButton.DOWN)
         if (m != stickMask) { stickMask = m; pushButtons() }
 
-        val l = maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE)) > 0.5f
-        val r = maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS)) > 0.5f
+        // Triggers that are ZL / ZR for the nub variant do nothing else.
+        val l = !full && maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE)) > 0.5f
+        val r = !full && maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS)) > 0.5f
         if (l != triggerL) { triggerL = l; synthesizeKey(KeyEvent.KEYCODE_BUTTON_L2, l) }
         if (r != triggerR) { triggerR = r; synthesizeKey(KeyEvent.KEYCODE_BUTTON_R2, r) }
         return true
     }
 
     private fun synthesizeKey(code: Int, down: Boolean) {
-        val actions = mapping.actionsFor(code)
+        val actions = mapping.actionsFor(code, gripActive)
         if (down) heldKeys += code else heldKeys -= code
         for (a in actions) if (!a.isDsButton) handleAction(a, down)
         recomputePadMask()
@@ -538,6 +694,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
             InputAction.MICROPHONE -> NativeLib.nativeSetMic(down)
             InputAction.LID -> if (down) toggleLid()
             InputAction.SCREENSHOT -> if (down) screenshot()
+            InputAction.STRUM -> if (down) NativeLib.nativeStrum()
             else -> Unit
         }
     }
@@ -589,8 +746,9 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         // Three columns in landscape keep the whole menu on screen; in portrait two, with the
         // odd one out (Settings) across both.
         val grid = content.findViewById<GridLayout>(R.id.menuGrid)
+        // With the GBA button the portrait grid comes out even, and Settings keeps one column.
         if (!isPortrait()) grid.columnCount = 3
-        else content.findViewById<View>(R.id.menuSettings).updateLayoutParams<GridLayout.LayoutParams> {
+        else if (!NativeLib.nativeReadsGba()) content.findViewById<View>(R.id.menuSettings).updateLayoutParams<GridLayout.LayoutParams> {
             columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 2, 1f)
         }
         val dialog = MaterialAlertDialogBuilder(this).setView(content).create()
@@ -615,6 +773,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         button(R.id.menuLid) { toggleLid() }
         button(R.id.menuReset) { confirmReset() }
         button(R.id.menuSettings) { startActivity(Intent(this, SettingsActivity::class.java)) }
+        if (NativeLib.nativeReadsGba()) {
+            content.findViewById<View>(R.id.menuGba).visibility = View.VISIBLE
+            button(R.id.menuGba) { showGbaPicker() }
+        }
         button(R.id.menuExit) { exitGame() }
         present(dialog)
     }
@@ -702,9 +864,11 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
             .setPositiveButton(R.string.cheats_apply) { _, _ ->
                 cheatStore.save(cheats)
                 cheatStore.apply(cheats)
+                refreshAnalog()
             }
             .setNegativeButton(R.string.cheats_add) { _, _ -> showAddCheat(cheats) }
-        if (paths.cheatDatabase.isFile) builder.setNeutralButton(R.string.cheats_database) { _, _ -> showDatabaseCheats(cheats) }
+        // Always: the analog controls codes are built in, usrcheat.dat or not.
+        builder.setNeutralButton(R.string.cheats_database) { _, _ -> showDatabaseCheats(cheats) }
         if (cheats.isEmpty()) builder.setMessage(R.string.cheats_none)
         else builder.setMultiChoiceItems(names, checked) { _, which, on -> cheats[which].enabled = on }
         val dialog = builder.create()
@@ -717,6 +881,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
                         cheats.removeAt(position)
                         cheatStore.save(cheats)
                         cheatStore.apply(cheats)
+                        refreshAnalog()
                         dialog.dismiss()
                     }
                     .setNegativeButton(android.R.string.cancel, null)
@@ -746,6 +911,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
                 cheats += Cheat(name.text.toString().ifBlank { getString(R.string.cheats_unnamed) }, code.text.toString().trim(), true)
                 cheatStore.save(cheats)
                 cheatStore.apply(cheats)
+                refreshAnalog()
                 dialog.dismiss()
             }
         }
@@ -770,6 +936,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
                     entries.forEachIndexed { i, c -> if (picked[i] && c.name !in have) cheats += c.copy(enabled = true) }
                     cheatStore.save(cheats)
                     cheatStore.apply(cheats)
+                    refreshAnalog()
                 }
                 .setNegativeButton(android.R.string.cancel, null)
                 .create()

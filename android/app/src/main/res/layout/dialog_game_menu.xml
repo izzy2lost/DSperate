@@ -125,6 +125,15 @@
                 android:layout_marginEnd="3dp"
                 android:text="@string/menu_close_lid" />
             <com.google.android.material.button.MaterialButton
+                android:id="@+id/menuGba"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="0dp"
+                android:layout_columnWeight="1"
+                android:layout_marginStart="3dp"
+                android:layout_marginEnd="3dp"
+                android:text="@string/menu_gba"
+                android:visibility="gone" />
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/menuSettings"
                 style="@style/Widget.Material3.Button.TonalButton"
                 android:layout_width="0dp"

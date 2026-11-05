@@ -57,7 +57,11 @@ public:
   // Emulator thread: both screens, 256x192 0xAARRGGBB each. With `hires`
   // (its contents are swapped with the presenter's previous ones), engine
   // A's screen shows its 3D at the frame's internal resolution.
-  void submit(const uint32_t* top, const uint32_t* bottom, HiresFrame* hires = nullptr);
+  // With `edges` (each screen's edge plane, Gpu::edge_plane, and its rows
+  // with edges, Gpu::edge_rows; null for none), the screen's 3D edges are cut
+  // at panel density (the edge cut, core/gpu/edge_cut.h) whatever the filter.
+  void submit(const uint32_t* top, const uint32_t* bottom, HiresFrame* hires = nullptr,
+              const uint32_t* const* edges = nullptr, const uint64_t* const* edge_rows = nullptr);
   // The newest frame, top screen above bottom (256x384), for thumbnails.
   void snapshot(std::vector<uint32_t>& out);
 
@@ -71,6 +75,7 @@ private:
   bool init_gl();
   bool init_xbrz();
   bool init_hires();
+  bool init_edges();
   void upload_hires();
   GLuint import_buffer(AHardwareBuffer* b);   // the GL texture sampling `b` (cached)
   void store_ghost(int screen);
@@ -92,6 +97,8 @@ private:
   std::vector<uint32_t> back_;         // newest submitted frame
   bool fresh_ = false;                 // back_ holds a frame not yet uploaded
   HiresFrame hi_back_;                 // the high-res data that goes with back_
+  std::vector<uint32_t> edge_back_;    // both screens' edge planes with back_ (rows without edges zero)
+  bool edge_back_on_[2] = {};
 
   // Render thread only.
   // One context shared by both displays' surfaces, so every texture serves both.
@@ -108,6 +115,11 @@ private:
   GLuint xbrz_prog_ = 0, xbrz_vbo_ = 0, xbrz_fbo_[2] = {0, 0}, xbrz_tex_[2] = {0, 0};
   GLint xbrz_u_tex_ = -1, xbrz_u_texsize_ = -1, xbrz_u_drawsize_ = -1;
   bool xbrz_failed_ = false, xbrz_stale_[2] = {true, true};
+  // The edge cut: the front frame's edge planes and the program drawing them.
+  std::vector<uint32_t> edge_front_;
+  bool edge_on_[2] = {}, edge_uploaded_ = false, edge_failed_ = false;
+  GLuint edge_prog_ = 0, edge_tex_[2] = {0, 0};
+  GLint edge_u_tex_ = -1, edge_u_edge_ = -1, edge_u_bw_ = -1;
   // High-res 3D composite: the uploaded frame's data and its program.
   HiresFrame hi_front_;
   GLuint hi_prog_ = 0, hi_tex_[4] = {0, 0, 0, 0};   // desc, operand, line, layer

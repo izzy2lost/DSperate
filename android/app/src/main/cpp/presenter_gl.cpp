@@ -65,6 +65,101 @@ void main() {
 }
 )";
 
+// The edge cut (core/gpu/edge_cut.h is the reference; this is the SDL
+// frontend's present.frag on GLES): each source pixel's panel block is cut
+// along its 3D edge line instead of showing the 1x blend. u_edge words are
+// 0xEERRGGBB: the edge byte (bit 7 edge, bit 6 the outside is the negative
+// neighbour, bit 5 a vertical run, bits 0-4 coverage) over the pixel's own
+// unblended colour. Nearest outside the cut.
+const char* kEdgeFragment = R"(#version 300 es
+precision highp float;
+precision highp int;
+precision highp usampler2D;
+uniform sampler2D u_tex;    // the screen, RGBA8 (red and blue swizzled back)
+uniform usampler2D u_edge;  // its edge plane, R32UI
+uniform float u_bw;         // the blend band in DS pixels (0: the hard cut)
+in vec2 v_uv;
+out vec4 o_col;
+uint frame_at(int x, int y) {
+  uvec3 c = uvec3(texelFetch(u_tex, ivec2(x, y), 0).rgb * 255.0 + 0.5);
+  return 0xFF000000u | (c.r << 16) | (c.g << 8) | c.b;
+}
+uint edge_at(int x, int y) { return texelFetch(u_edge, ivec2(x, y), 0).r; }
+bool same_colour(uint a, uint b) {
+  ivec3 d = abs(ivec3(int((a >> 16) & 255u), int((a >> 8) & 255u), int(a & 255u)) - ivec3(int((b >> 16) & 255u), int((b >> 8) & 255u), int(b & 255u)));
+  return max(d.x, max(d.y, d.z)) <= 4;
+}
+float cut_pos(uint e) {
+  float f = float((e & 31u) + 1u) / 32.0;
+  return (e & 64u) != 0u ? 1.0 - f : f;
+}
+vec3 unpack(uint s) { return vec3(float((s >> 16) & 255u), float((s >> 8) & 255u), float(s & 255u)); }
+float edge_line(uint e, int x, int y, float along) {
+  bool vert = (e & 32u) != 0u, neg = (e & 64u) != 0u;
+  int nx = x + (vert ? (along < 0.0 ? -1 : 1) : 0), ny = y + (vert ? 0 : (along < 0.0 ? -1 : 1));
+  float pos = cut_pos(e), pn = pos;
+  if (nx >= 0 && nx < 256 && ny >= 0 && ny < 192) {
+    uint n = edge_at(nx, ny) >> 24;
+    if ((n & 224u) == (e & 224u)) pn = cut_pos(n);
+    else if ((n & 224u) == ((e ^ 64u) & 224u)) pn = cut_pos(n);
+    else {
+      int ox = nx + (vert ? 0 : (neg ? -1 : 1)), oy = ny + (vert ? (neg ? -1 : 1) : 0);
+      if (ox >= 0 && ox < 256 && oy >= 0 && oy < 192) {
+        uint o = edge_at(ox, oy) >> 24;
+        if ((o & 224u) == ((e ^ 64u) & 224u)) pn = cut_pos(o) + (neg ? -1.0 : 1.0);
+      }
+    }
+  }
+  return pos + (pn - pos) * abs(along);
+}
+vec3 edge_cut(int sx, int sy, float u, float v, uint s, float bw) {
+  uint w = edge_at(sx, sy);
+  if ((w & 0x80000000u) == 0u) {
+    vec3 c = unpack(s);
+    if (bw <= 0.0 || w == 0u) return c;
+    float best = 0.0;
+    const ivec2 nb[4] = ivec2[4](ivec2(0, -1), ivec2(0, 1), ivec2(-1, 0), ivec2(1, 0));
+    for (int k = 0; k < 4; ++k) {
+      int qx = sx + nb[k].x, qy = sy + nb[k].y;
+      if (qx < 0 || qx > 255 || qy < 0 || qy > 191) continue;
+      uint wn = edge_at(qx, qy);
+      if ((wn & 0x80000000u) == 0u) continue;
+      uint en = wn >> 24;
+      bool vn = (en & 32u) != 0u, gn = (en & 64u) != 0u;
+      bool toward = vn ? (nb[k].x == 0 && (nb[k].y == -1 ? !gn : gn)) : (nb[k].y == 0 && (nb[k].x == -1 ? !gn : gn));
+      if (!toward) continue;
+      uint own = 0xFF000000u | (wn & 0xFFFFFFu);
+      if (same_colour(own, s)) continue;
+      float tn = vn ? v - float(nb[k].y) : u - float(nb[k].x);
+      float ln = edge_line(en, qx, qy, (vn ? u : v) - 0.5);
+      float wgt = clamp(0.5 + (gn ? tn - ln : ln - tn) / bw, 0.0, 1.0);
+      if (wgt > best) { best = wgt; c = mix(unpack(s), unpack(own), wgt); }
+    }
+    return c;
+  }
+  uint e = w >> 24;
+  bool vert = (e & 32u) != 0u, neg = (e & 64u) != 0u;
+  float t = vert ? v : u;
+  float line = edge_line(e, sx, sy, (vert ? u : v) - 0.5);
+  bool inside = neg ? (t >= line) : (t < line);
+  int px = vert ? sx : (neg ? sx - 1 : sx + 1), py = vert ? (neg ? sy - 1 : sy + 1) : sy;
+  uint own = 0xFF000000u | (w & 0xFFFFFFu);
+  if (px < 0 || px > 255 || py < 0 || py > 191) return unpack(own);
+  uint o = frame_at(px, py);
+  if (same_colour(own, o)) return unpack(s);
+  { uint n = edge_at(px, py) >> 24; if ((n & 128u) != 0u && ((n ^ e) & 96u) == 64u) return unpack(s); }
+  if (bw <= 0.0) return unpack(inside ? own : o);
+  return mix(unpack(o), unpack(own), clamp(0.5 + (neg ? t - line : line - t) / bw, 0.0, 1.0));
+}
+void main() {
+  float fx = v_uv.x * 256.0, fy = v_uv.y * 192.0;
+  int sx = clamp(int(fx), 0, 255), sy = clamp(int(fy), 0, 191);
+  uint s = frame_at(sx, sy);
+  vec3 col = edge_cut(sx, sy, clamp(fx - float(sx), 0.0, 1.0), clamp(fy - float(sy), 0.0, 1.0), s, u_bw);
+  o_col = vec4(col / 255.0, 1.0);
+}
+)";
+
 constexpr int XBRZ_SCALE = 6;
 
 // Engine A's screen with its 3D at the internal resolution: each output pixel
@@ -205,10 +300,23 @@ void Presenter::set_filter(int filter) {
   cv_.notify_all();
 }
 
-void Presenter::submit(const uint32_t* top, const uint32_t* bottom, HiresFrame* hires) {
+void Presenter::submit(const uint32_t* top, const uint32_t* bottom, HiresFrame* hires,
+                       const uint32_t* const* edges, const uint64_t* const* edge_rows) {
   std::lock_guard<std::mutex> lock(mu_);
   std::memcpy(back_.data(), top, W * H * 4);
   std::memcpy(back_.data() + W * H, bottom, W * H * 4);
+  for (int sc = 0; sc < 2; ++sc) {
+    const bool on = edges && edges[sc] && edge_rows && edge_rows[sc] && (edge_rows[sc][0] | edge_rows[sc][1] | edge_rows[sc][2]);
+    edge_back_on_[sc] = on;
+    if (!on) continue;
+    if (edge_back_.size() != static_cast<size_t>(2 * W * H)) edge_back_.assign(2 * W * H, 0);
+    // Only the marked rows hold this frame's edges; the others may be stale in the core's plane.
+    uint32_t* dst = edge_back_.data() + sc * W * H;
+    for (int y = 0; y < H; ++y) {
+      if ((edge_rows[sc][y >> 6] >> (y & 63)) & 1) std::memcpy(dst + y * W, edges[sc] + y * W, W * 4);
+      else std::memset(dst + y * W, 0, W * 4);
+    }
+  }
   if (hires) std::swap(hi_back_, *hires);
   else hi_back_.valid = false;
   fresh_ = true;
@@ -295,8 +403,13 @@ void Presenter::release_all() {
     if (xbrz_fbo_[0]) glDeleteFramebuffers(2, xbrz_fbo_);
     if (xbrz_tex_[0]) glDeleteTextures(2, xbrz_tex_);
     if (hi_prog_) glDeleteProgram(hi_prog_);
+    if (edge_prog_) glDeleteProgram(edge_prog_);
+    if (edge_tex_[0]) glDeleteTextures(2, edge_tex_);
     if (hi_tex_[0]) glDeleteTextures(4, hi_tex_);
   }
+  edge_prog_ = 0;
+  edge_tex_[0] = edge_tex_[1] = 0;
+  edge_uploaded_ = false;
   hi_prog_ = 0;
   hi_tex_[0] = hi_tex_[1] = hi_tex_[2] = hi_tex_[3] = 0;
   hi_layer_scale_ = 0;
@@ -316,7 +429,8 @@ void Presenter::release_all() {
   for (int d = 0; d < DISPLAYS; ++d) release_surface(d);
   if (context_ != EGL_NO_CONTEXT) eglDestroyContext(display_, context_);
   context_ = EGL_NO_CONTEXT;
-  if (display_ != EGL_NO_DISPLAY) eglTerminate(display_);
+  // Not eglTerminate: EGL_DEFAULT_DISPLAY is the process's, and the OpenGL ES
+  // 3D raster (core/gpu/gl) has its own context on it.
   display_ = EGL_NO_DISPLAY;
 }
 
@@ -371,6 +485,33 @@ bool Presenter::init_xbrz() {
     xbrz_stale_[s] = true;
   }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  return true;
+}
+
+bool Presenter::init_edges() {
+  if (edge_prog_) return true;
+  if (edge_failed_) return false;
+  GLuint v = compile(GL_VERTEX_SHADER, kVertex), f = compile(GL_FRAGMENT_SHADER, kEdgeFragment);
+  if (!v || !f) { edge_failed_ = true; LOGW("edge cut: shader rejected; drawing without it"); return false; }
+  edge_prog_ = glCreateProgram();
+  glAttachShader(edge_prog_, v);
+  glAttachShader(edge_prog_, f);
+  glLinkProgram(edge_prog_);
+  glDeleteShader(v);
+  glDeleteShader(f);
+  GLint ok = 0;
+  glGetProgramiv(edge_prog_, GL_LINK_STATUS, &ok);
+  if (!ok) { glDeleteProgram(edge_prog_); edge_prog_ = 0; edge_failed_ = true; LOGW("edge cut: link failed"); return false; }
+  edge_u_tex_ = glGetUniformLocation(edge_prog_, "u_tex");
+  edge_u_edge_ = glGetUniformLocation(edge_prog_, "u_edge");
+  edge_u_bw_ = glGetUniformLocation(edge_prog_, "u_bw");
+  glGenTextures(2, edge_tex_);
+  for (GLuint t : edge_tex_) {
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_R32UI, W, H);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  }
   return true;
 }
 
@@ -539,6 +680,9 @@ void Presenter::draw() {
     if (fresh_) {
       front_.swap(back_); std::memcpy(back_.data(), front_.data(), W * H * 2 * 4); fresh_ = false; have_frame_ = false;
       std::swap(hi_front_, hi_back_); hi_back_.valid = false; hi_uploaded_ = false;
+      if (edge_back_on_[0] || edge_back_on_[1]) edge_front_.swap(edge_back_);
+      for (int sc = 0; sc < 2; ++sc) { edge_on_[sc] = edge_back_on_[sc]; edge_back_on_[sc] = false; }
+      edge_uploaded_ = false;
       for (Ghost& g : ghost_) ++g.age;
     }
     dirty_ = false;
@@ -582,6 +726,14 @@ void Presenter::draw() {
     glDisableVertexAttribArray(1);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  }
+  if (!edge_uploaded_ && (edge_on_[0] || edge_on_[1]) && init_edges()) {
+    for (int sc = 0; sc < 2; ++sc) {
+      if (!edge_on_[sc]) continue;
+      glBindTexture(GL_TEXTURE_2D, edge_tex_[sc]);
+      glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_RED_INTEGER, GL_UNSIGNED_INT, edge_front_.data() + sc * W * H);
+    }
+    edge_uploaded_ = true;
   }
   // Which screen (if any) shows engine A's 3D at the internal resolution.
   int hi_screen = -1;
@@ -641,6 +793,18 @@ void Presenter::draw_display(int d, const ScreenRect* rect, int filter, bool xbr
       for (int t = 0; t < 4; ++t) { glActiveTexture(GL_TEXTURE1 + t); glBindTexture(GL_TEXTURE_2D, hi_tex_[t == 0 ? 3 : t - 1]); }
       glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, hi_layer8_tex_);
       glUniform1i(hi_u_ghost_, 0);
+      glActiveTexture(GL_TEXTURE0);
+      glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+      glUseProgram(program_);
+      continue;
+    }
+    if (edge_on_[s] && edge_prog_) {
+      glUseProgram(edge_prog_);
+      glUniform1i(edge_u_tex_, 0);
+      glUniform1i(edge_u_edge_, 1);
+      glUniform1f(edge_u_bw_, 1.0f);
+      glBindTexture(GL_TEXTURE_2D, tex_[s]);   // texelFetch: the sampler state is not used
+      glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, edge_tex_[s]);
       glActiveTexture(GL_TEXTURE0);
       glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
       glUseProgram(program_);

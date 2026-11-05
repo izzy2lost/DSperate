@@ -5,7 +5,10 @@
 #include "core/cheat/database.h"
 #include "core/cpu/timing_mode.h"
 #include "core/io/dsi_nand_persist.h"
+#include "core/gpu/vk/vk_device.h"
 #include "core/host_cores.h"
+#include "core/input/input_log.h"
+#include "core/slot2/compat.h"
 #include "core/state/state.h"
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
@@ -162,16 +165,30 @@ std::string Session::boot(const SessionConfig& cfg) {
     LOGI("jit: strict timing for the DS menu");
   }
 #endif
-  nds.gpu3d.renderer().set_aa(cfg.aa);
+  nds.gpu3d.renderer().set_aa(cfg.aa != 0);
+  nds.gpu3d.renderer().set_aa_enhanced(cfg.aa == 2);
   // Upscaled 3D and smoothed textures are the GPU raster's: either turns it on.
   const int scale = std::clamp(cfg.gpu_scale, 1, 8);
   if (cfg.gpu3d || scale > 1 || cfg.tex_filter) {
+    // Compiled pipelines are kept between runs (the Mali blob takes seconds
+    // to build them from SPIR-V); set before the first Vulkan device opens.
+    ds::gpu::vk::Device::set_pipeline_cache_file(cfg.cache_dir + "/vk_pipelines.bin");
     std::string why;
     nds.gpu3d.renderer().set_gpu_scale(static_cast<ds::u32>(scale));
     nds.gpu3d.renderer().set_gpu_tex_filter(cfg.tex_filter);
-    if (!nds.gpu3d.renderer().set_gpu(true, &why)) LOGW("gpu3d: unavailable (%s), drawing on the CPU", why.c_str());
-    else if (scale > 1) nds.gpu.set_hires(true);
+    // Enhanced AA is the edge cut, drawn by the presenter from the core's
+    // edge planes: at 1x only (above, the raster keeps MSAA). Before the
+    // raster starts: its AA is fixed at creation.
+    if (cfg.aa == 2 && scale == 1) nds.gpu.set_edge_export(true);
+    if (!nds.gpu3d.renderer().set_gpu(true, &why)) {
+      LOGW("gpu3d: unavailable (%s), drawing on the CPU", why.c_str());
+      nds.gpu.set_edge_export(false);   // the CPU raster shows the hardware's blend
+    } else {
+      LOGI("gpu3d: on (%s, %dx%s)", nds.gpu3d.renderer().gpu_api(), scale, nds.gpu.edge_export() ? ", edge cut" : "");
+      if (scale > 1) nds.gpu.set_hires(true);
+    }
   }
+  fill_slot2("", "");
   const std::string& mode = cfg.net_mode;
   if (mode == "internet") {
     slirp_ = std::make_unique<ds::net::SlirpDriver>();
@@ -309,6 +326,7 @@ void Session::stop() {
   presenter_.stop();
   if (!nds_) return;
   if (nds_->cart && nds_->cart->sram_dirty()) write_save();
+  write_gba_save();
   export_dsi_saves();
   if (!fw_override_.empty() && nds_->firmware_override_dirty()) {
     std::string err;
@@ -417,10 +435,80 @@ void Session::write_save() {
   else LOGW("save: cannot write %s", cfg_.save_path.c_str());
 }
 
+void Session::write_gba_save() {
+  ds::slot2::GameCart* g = nds_ ? nds_->gba_cart() : nullptr;
+  if (!g || !g->save_dirty() || gba_save_.empty()) return;
+  std::string err;
+  if (ds::slot2::write_save(*g, gba_save_, err)) g->clear_save_dirty();
+  else LOGW("slot2: %s", err.c_str());
+}
+
+// What slot 2 holds: the GBA game `rom` (with its save file), else the Guitar
+// Grip for the games played with it, else the Rumble Pak when wanted, else
+// nothing. DSi titles have no slot 2. Replaces what was there, after saving it.
+void Session::fill_slot2(const std::string& rom, const std::string& save) {
+  ds::NDS& nds = *nds_;
+  write_gba_save();
+  nds.slot2.reset();
+  gba_save_.clear();
+  slot2_kind_.store(0);
+  if (dsi_ || nds.dsi || !nds.cart) return;
+  if (!rom.empty()) {
+    std::string err;
+    if (std::unique_ptr<ds::slot2::GameCart> g = ds::slot2::load_game(rom, save, err)) {
+      g->set_light_level(5);
+      LOGI("slot2: %s [%s], save %s%s", g->title(), g->game_code(), ds::slot2::save_type_name(g->save_type()), g->solar_sensor() ? ", solar sensor" : "");
+      gba_save_ = save;
+      gba_writes_seen_ = g->save_writes();
+      nds.slot2 = std::move(g);
+      slot2_kind_.store(1);
+      return;
+    }
+    LOGW("slot2: %s", err.c_str());
+  }
+  // The Guitar Hero games refuse to start without their grip.
+  if (cfg_.guitar_grip && ds::slot2::uses_guitar_grip(nds.cart->header().game_code)) {
+    nds.slot2 = std::make_unique<ds::slot2::GuitarGrip>();
+    slot2_kind_.store(3);
+    LOGI("slot2: Guitar Grip");
+    return;
+  }
+  if (cfg_.rumble) {
+    nds.slot2 = std::make_unique<ds::slot2::RumblePak>();
+    slot2_kind_.store(2);
+    LOGI("slot2: Rumble Pak");
+  }
+}
+
+std::string Session::set_slot2_gba(const std::string& rom, const std::string& save) {
+  std::string result;
+  post([&] {
+    fill_slot2(rom, save);
+    if (!rom.empty() && slot2_kind_.load() != 1) result = "That GBA game could not be read";
+  }, true);
+  return result;
+}
+
+bool Session::reads_gba() const {
+  return nds_ && nds_->cart && !nds_->dsi && ds::slot2::linkage_for(nds_->cart->header().game_code) != nullptr;
+}
+
+std::vector<std::string> Session::gba_offers(const std::vector<std::string>& paths) const {
+  std::vector<std::string> out;
+  if (!reads_gba()) return out;
+  const ds::slot2::Linkage* link = ds::slot2::linkage_for(nds_->cart->header().game_code);
+  for (const std::string& p : paths) {
+    char code[5], title[13];
+    if (ds::slot2::peek_game(p, code, title) && ds::slot2::accepts(*link, code)) out.push_back(p);
+  }
+  return out;
+}
+
 bool Session::flush_save() {
   bool wrote = false;
   post([&] {
     if (nds_ && nds_->cart && nds_->cart->sram_dirty()) { write_save(); wrote = true; }
+    if (nds_ && nds_->gba_cart() && nds_->gba_cart()->save_dirty()) { write_gba_save(); wrote = true; }
     if (nds_ && dsi_ && nds_->dsi_nand.writes != nand_exported_) { export_dsi_saves(); wrote = true; }
   }, true);
   return wrote;
@@ -470,6 +558,7 @@ std::string Session::load_state(const std::string& path) {
 void Session::reset() {
   post([this] {
     if (nds_->cart && nds_->cart->sram_dirty()) write_save();
+    write_gba_save();
     export_dsi_saves();
 #if DSPERATE_JIT
     if (jit_on_) ds::jit::flush_all();
@@ -483,16 +572,38 @@ void Session::reset() {
 
 void Session::set_cheats(std::vector<CheatItem> enabled) {
   post([this, items = std::move(enabled)] {
-    std::vector<ds::cheat::Code> codes;
+    // In place: the engine undoes an analog patch's hook when it sees its
+    // code go from on to off, so a code dropped from the list stays in it, off.
+    std::vector<ds::cheat::Code>& codes = nds_->cheats.codes;
+    for (ds::cheat::Code& c : codes) c.enabled = false;
     for (const CheatItem& it : items) {
+      const std::vector<ds::u32> words(it.words.begin(), it.words.end());
+      auto same = std::find_if(codes.begin(), codes.end(), [&](const ds::cheat::Code& c) { return c.name == it.name && c.words == words; });
+      if (same != codes.end()) { same->enabled = true; continue; }
       ds::cheat::Code c;
       c.name = it.name;
       c.enabled = true;
-      c.words.assign(it.words.begin(), it.words.end());
+      c.analog = it.name.rfind("CPAD", 0) == 0;   // as the database marks them
+      c.words = words;
       codes.push_back(std::move(c));
     }
-    nds_->cheats.codes = std::move(codes);
+    refresh_analog();
   }, true);
+}
+
+// The sticks reach a CPAD patch only while one is enabled and the player wants
+// them; with neither, nothing is written where a hook reads.
+void Session::refresh_analog() {
+  ds::NDS& nds = *nds_;
+  const ds::cheat::AnalogRequest req = ds::cheat::analog_request(nds.cheats.codes);
+  const bool on = cfg_.analog && req.schemes > 0;
+  if (req.schemes > 1) LOGW("analog: %d CPAD codes are enabled at once; their hooks will fight", req.schemes);
+  if (!on && (nds.analog_patch || req.schemes)) ds::input::clear_analog(nds);
+  nds.analog_patch = on;
+  nds.analog_full = on && req.nub;
+  nds.analog_layout = req.extended ? ds::NDS::AnalogLayout::Extended : ds::NDS::AnalogLayout::Packed;
+  analog_state_.store((!on ? 0 : req.schemes > 1 ? 2 : 1) | (nds.analog_full ? 4 : 0));
+  if (on) LOGI("analog: \"%s\" active%s", req.name, nds.analog_full ? " (nub + ZL/ZR)" : "");
 }
 
 std::vector<CheatItem> Session::database_cheats(const std::string& db_path, std::string& err) {
@@ -502,14 +613,18 @@ std::vector<CheatItem> Session::database_cheats(const std::string& db_path, std:
     uint8_t header[512];
     nds_->cart->rom_read(0, header, sizeof header);
     ds::cheat::GameCheats found;
-    if (!ds::cheat::load_for_header(db_path, header, found, err)) {
-      if (err.empty()) err = "This game is not in the cheat database";
-      return;
-    }
+    if (!db_path.empty() && file_exists(db_path) && !ds::cheat::load_for_header(db_path, header, found, err) && !err.empty()) return;
+    err.clear();
+    // The analog controls codes built in (shocoman's CPAD patches), for this exact ROM.
+    ds::cheat::GameCheats analog;
+    std::string aerr;
+    if (ds::cheat::load_analog_for_header("", header, analog, aerr)) ds::cheat::merge_analog(found, std::move(analog), ds::cheat::header_checksum(header));
+    if (found.codes.empty()) { err = "This game is not in the cheat database"; return; }
     for (const ds::cheat::Code& c : found.codes) {
       if (c.is_note()) continue;
       CheatItem it;
-      it.name = c.group >= 0 && c.group < static_cast<int>(found.groups.size()) ? found.groups[c.group].name + ": " + c.name : c.name;
+      // An analog code keeps its own name: "CPAD..." is how set_cheats knows it.
+      it.name = !c.analog && c.group >= 0 && c.group < static_cast<int>(found.groups.size()) ? found.groups[c.group].name + ": " + c.name : c.name;
       it.description = c.description;
       it.words.assign(c.words.begin(), c.words.end());
       out.push_back(std::move(it));
@@ -520,15 +635,24 @@ std::vector<CheatItem> Session::database_cheats(const std::string& db_path, std:
 
 void Session::run_one_frame() {
   ds::NDS& nds = *nds_;
-  const uint32_t mask = buttons_.load(std::memory_order_relaxed);
-  nds.io.set_buttons(mask);
-  const uint32_t t = touch_.load(std::memory_order_relaxed);
-  nds.io.set_touch(static_cast<int>((t >> 8) & 0xFF), static_cast<int>(t & 0xFF), (t >> 31) != 0);
   const bool lid = lid_.load(std::memory_order_relaxed);
-  if (lid != nds.io.lid_closed()) {
-    nds.io.set_lid(lid);
-    if (lid && nds.cart && nds.cart->sram_dirty()) write_save();
+  if (lid != nds.io.lid_closed() && lid && nds.cart && nds.cart->sram_dirty()) write_save();
+  ds::input::Frame in;
+  in.buttons = static_cast<ds::u16>(buttons_.load(std::memory_order_relaxed));
+  const uint32_t t = touch_.load(std::memory_order_relaxed);
+  in.x = static_cast<ds::u8>((t >> 8) & 0xFF);
+  in.y = static_cast<ds::u8>(t & 0xFF);
+  in.down = (t >> 31) != 0;
+  in.lid = lid;
+  in.cpad_x = analog_[0].load(std::memory_order_relaxed); in.cpad_y = analog_[1].load(std::memory_order_relaxed);
+  in.cstick_x = analog_[2].load(std::memory_order_relaxed); in.cstick_y = analog_[3].load(std::memory_order_relaxed);
+  const int zlzr = analog_zlzr_.load(std::memory_order_relaxed);
+  in.zl = (zlzr & 1) != 0; in.zr = (zlzr & 2) != 0;
+  if (slot2_kind_.load(std::memory_order_relaxed) == 3) {
+    in.frets = static_cast<ds::u8>(frets_.load(std::memory_order_relaxed));
+    strum_frame(in);
   }
+  ds::input::apply(nds, in);   // buttons, pen, lid, frets, and the sticks while a CPAD patch runs
   const int mic_mode = mic_mode_.load(std::memory_order_relaxed);
   if (mic_mode > 0 && mic_.load(std::memory_order_relaxed)) {
     // Blowing into the microphone: loud noise is what games listen for.
@@ -605,6 +729,10 @@ void Session::run_one_frame() {
         hires_.layer.assign(h.layer3d, h.layer3d + n * h.scale * h.scale);
       }
       presenter_.submit(nds.gpu.framebuffer(0), nds.gpu.framebuffer(1), &hires_);
+    } else if (nds.gpu.edge_export()) {
+      const uint32_t* planes[2] = {nds.gpu.edge_plane(0), nds.gpu.edge_plane(1)};
+      const uint64_t* rows[2] = {nds.gpu.edge_rows(0), nds.gpu.edge_rows(1)};
+      presenter_.submit(nds.gpu.framebuffer(0), nds.gpu.framebuffer(1), nullptr, planes, rows);
     } else {
       presenter_.submit(nds.gpu.framebuffer(0), nds.gpu.framebuffer(1));
     }
@@ -616,6 +744,11 @@ void Session::run_one_frame() {
     if (writes != last_sram_writes_) { last_sram_writes_ = writes; sram_quiet_frames_ = 0; }
     else if (nds.cart->sram_dirty() && ++sram_quiet_frames_ >= SRAM_QUIET_FRAMES) { write_save(); sram_quiet_frames_ = 0; }
   }
+  if (const ds::slot2::GameCart* g = nds.gba_cart(); g && g->save_dirty()) {
+    if (g->save_writes() != gba_writes_seen_) { gba_writes_seen_ = g->save_writes(); gba_quiet_frames_ = 0; }
+    else if (++gba_quiet_frames_ >= SRAM_QUIET_FRAMES) { write_gba_save(); gba_quiet_frames_ = 0; }
+  }
+  if (nds.slot2) rumble_events_.store(nds.slot2->rumble_events(), std::memory_order_relaxed);
   if (dsi_) {
     const uint64_t writes = nds.dsi_nand.writes;
     if (writes != nand_writes_seen_) { nand_writes_seen_ = writes; nand_quiet_frames_ = 0; }
@@ -642,6 +775,26 @@ void Session::run_one_frame() {
 #endif
   // The game asked the console to switch off; there is no power to cut, so carry on.
   if (nds.power_off) nds.power_off = false;
+}
+
+// A strum is the grip's pick: a stroke down the touch screen's middle, one
+// point a frame for four frames, lifted on the fifth; the next goes up. One
+// asked for mid-stroke follows it.
+void Session::strum_frame(ds::input::Frame& f) {
+  const int asked = strums_.load(std::memory_order_relaxed);
+  if (asked != strums_seen_) { strums_seen_ = asked; if (strum_step_) strum_queued_ = true; else strum_step_ = 1; }
+  if (!strum_step_) return;
+  static constexpr ds::u8 kX = 150, kY[4] = {50, 85, 120, 155};
+  if (strum_step_ <= 4) {
+    const int i = strum_step_ - 1;
+    f.x = kX; f.y = kY[strum_up_ ? 3 - i : i]; f.down = true;
+    ++strum_step_;
+    return;
+  }
+  f.down = false;
+  strum_up_ = !strum_up_;
+  strum_step_ = strum_queued_ ? 1 : 0;
+  strum_queued_ = false;
 }
 
 void Session::run_net_frame(ds::NDS& nds) {
