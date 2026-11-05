@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "frontend/sdl/gpu_present.h"
+#include "frontend/sdl/video/presenter.h"
 
 #include <cstdio>
 #include <algorithm>
@@ -36,7 +37,7 @@ __asm__(".section .rodata\n.balign 4\n.globl ds_present_vert_data\nds_present_ve
         ".globl ds_present_frag_end\nds_present_frag_end:\n.previous\n");
 
 constexpr u32 kFrameWords = 256 * 192;     // one screen
-constexpr u32 kSlotWords = 2 * kFrameWords;  // both screens
+constexpr u32 kSlotWords = 4 * kFrameWords;  // both screens, then both screens' edge planes (the edge cut)
 constexpr int kSlots = 2;                  // frames in flight + the one being written
 constexpr int kMaxBufs = 8;
 constexpr u32 kBindings = 3;               // source frames, overlay, grid table (bindings 1..3)
@@ -66,6 +67,7 @@ struct GpuPresent::Impl {
   u32 w = 0, h = 0;
 
   Buffer src;                                  // kSlots x kSlotWords
+  u64 edge_rows[kSlots][2][3] = {};            // lines of each slot's edge planes that hold edges (the rest are zero)
   VkShaderModule vmod = VK_NULL_HANDLE, fmod = VK_NULL_HANDLE;
   VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
@@ -316,11 +318,12 @@ std::unique_ptr<GpuPresent> GpuPresent::open(ScanoutOut& out, std::string* why) 
   VkGraphicsPipelineCreateInfo gp{}; gp.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gp.stageCount = 2; gp.pStages = st;
   gp.pVertexInputState = &vin; gp.pInputAssemblyState = &ia; gp.pViewportState = &vs; gp.pRasterizationState = &rs; gp.pMultisampleState = &ms;
   gp.pColorBlendState = &cbs; gp.pDynamicState = &ds; gp.layout = d.layout; gp.renderPass = d.rp;
-  if (d.a->vkCreateGraphicsPipelines(d.vk->dev, VK_NULL_HANDLE, 1, &gp, nullptr, &d.pipe) != VK_SUCCESS) return fail("present pipeline failed to compile");
+  if (d.a->vkCreateGraphicsPipelines(d.vk->dev, d.vk->pcache, 1, &gp, nullptr, &d.pipe) != VK_SUCCESS) return fail("present pipeline failed to compile");
   blend.blendEnable = VK_TRUE;
-  if (d.a->vkCreateGraphicsPipelines(d.vk->dev, VK_NULL_HANDLE, 1, &gp, nullptr, &d.pipe_fade) != VK_SUCCESS) return fail("fade pipeline failed to compile");
+  if (d.a->vkCreateGraphicsPipelines(d.vk->dev, d.vk->pcache, 1, &gp, nullptr, &d.pipe_fade) != VK_SUCCESS) return fail("fade pipeline failed to compile");
   blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA; blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-  if (d.a->vkCreateGraphicsPipelines(d.vk->dev, VK_NULL_HANDLE, 1, &gp, nullptr, &d.pipe_over) != VK_SUCCESS) return fail("overlay pipeline failed to compile");
+  if (d.a->vkCreateGraphicsPipelines(d.vk->dev, d.vk->pcache, 1, &gp, nullptr, &d.pipe_over) != VK_SUCCESS) return fail("overlay pipeline failed to compile");
+  d.dev->save_pipeline_cache();
 
   VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxBufs * kSlots * kBindings};
   VkDescriptorPoolCreateInfo dp{}; dp.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dp.maxSets = kMaxBufs * kSlots; dp.poolSizeCount = 1; dp.pPoolSizes = &ps;
@@ -382,7 +385,7 @@ bool GpuPresent::reimport(ScanoutOut& out) {
 void GpuPresent::flush(ScanoutOut& out) { d_->retire(out); }
 
 bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* views, int nviews, int rot, int lw, int lh, u8 inset_alpha,
-                         SDL_Rect drawn, u32 grid) {
+                         SDL_Rect drawn, u32 grid, const EdgePlanes* edges) {
   Impl& d = *d_;
   const Api& a = *d.a;
   // The previous frame first: its fence, then its buffer to the tier. Only
@@ -401,6 +404,23 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
 
   u32* dst = static_cast<u32*>(d.src.ptr) + static_cast<size_t>(slot) * kSlotWords;
   for (int s = 0; s < 2; ++s) std::memcpy(dst + static_cast<size_t>(s) * kFrameWords, fb[s], sizeof(u32) * kFrameWords);
+  // The edge planes: the marked lines copied, lines left over from this
+  // slot's last frame cleared, the rest already zero.
+  // The cut's two colours are mixed by distance from the line over a band one DS pixel wide
+  // (present.frag). DS_EDGE_BLEND=W sets the width in DS pixels (up to 3.9); 0 is the hard cut.
+  static const u32 blend16 = [] { const char* e = std::getenv("DS_EDGE_BLEND"); return e ? std::min<u32>(63, static_cast<u32>(std::atof(e) * 16.0 + 0.5)) : 16u; }();
+  bool cut[2] = {false, false};
+  for (int s = 0; s < 2; ++s) {
+    u32* const ep = dst + static_cast<size_t>(2 + s) * kFrameWords;
+    u64* const had = d.edge_rows[slot][s];
+    const bool on = edges && edges->plane[s] && edges->rows[s];
+    const u64 now_rows[3] = {on ? edges->rows[s][0] : 0, on ? edges->rows[s][1] : 0, on ? edges->rows[s][2] : 0};
+    for (u32 y = 0; y < 192; ++y)
+      if (((had[y >> 6] & ~now_rows[y >> 6]) >> (y & 63)) & 1) std::memset(ep + y * 256, 0, 256 * sizeof(u32));
+    if (on) copy_edge_rows(ep, *edges, s, fb[s]);
+    for (int k = 0; k < 3; ++k) had[k] = now_rows[k];
+    cut[s] = now_rows[0] | now_rows[1] | now_rows[2];
+  }
   d.dev->flush(d.src, static_cast<size_t>(slot) * kSlotWords * sizeof(u32), kSlotWords * sizeof(u32));
   u64 t3 = now(); d.t_upload += t3 - t2;
 
@@ -458,7 +478,7 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
     pc.rect[0] = r.x; pc.rect[1] = r.y; pc.rect[2] = r.w; pc.rect[3] = r.h;
     pc.b[1] = 0;
     pc.b[2] = static_cast<u32>(slot) * kSlotWords + static_cast<u32>(views[v].screen) * kFrameWords;
-    pc.b[3] = static_cast<u32>(v) | (views[v].grid ? 0x100u : 0u) | (std::min<u32>(grid, 256) << 16);
+    pc.b[3] = static_cast<u32>(v) | (views[v].grid ? 0x100u : 0u) | (cut[views[v].screen & 1] ? 0x200u | (blend16 << 10) : 0u) | (std::min<u32>(grid, 256) << 16);
     pc.s[0] = 256.0f / static_cast<float>(r.w); pc.s[1] = 192.0f / static_cast<float>(r.h);
     pc.s[2] = 0.5f / static_cast<float>(r.w);   pc.s[3] = 0.5f / static_cast<float>(r.h);
     const bool fade = views[v].blends && inset_alpha < 255;
@@ -502,7 +522,7 @@ std::unique_ptr<GpuPresent> GpuPresent::open(ScanoutOut&, std::string* why) { if
 GpuPresent::~GpuPresent() = default;
 bool GpuPresent::reimport(ScanoutOut&) { return false; }
 void GpuPresent::flush(ScanoutOut&) {}
-bool GpuPresent::present(ScanoutOut&, const u32* const*, const View*, int, int, int, int, u8, SDL_Rect, u32) { return false; }
+bool GpuPresent::present(ScanoutOut&, const u32* const*, const View*, int, int, int, int, u8, SDL_Rect, u32, const EdgePlanes*) { return false; }
 u32* GpuPresent::overlay(int, int) { return nullptr; }
 const std::string& GpuPresent::device_name() const { static const std::string none; return none; }
 } // namespace ds::sdl

@@ -24,7 +24,10 @@ add_library(dsperate_core STATIC
   cart/miniz/miniz_tinfl.c
   cart/miniz/miniz_tdef.c
   cart/miniz/miniz.c
+  slot2/slot2.cpp
+  slot2/compat.cpp
   cheat/ar_engine.cpp
+  cheat/analog_db.cpp
   cheat/database.cpp
   sched/scheduler.cpp
   cpu/cpu.cpp
@@ -60,6 +63,11 @@ add_library(dsperate_core STATIC
   io/dsi_font.cpp
   io/dsi_nwifi.cpp
 )
+# GCC < 9 keeps C++17 std::filesystem (io/dsi_*) in a separate library. PUBLIC,
+# so every executable linking the core gets it, the tests included (#24).
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(dsperate_core PUBLIC stdc++fs)
+endif()
 target_include_directories(dsperate_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 # Android: the GPU raster hands its scaled picture over as an AHardwareBuffer.
 if(ANDROID)
@@ -116,6 +124,11 @@ set_property(SOURCE io/dsi_font.cpp APPEND PROPERTY OBJECT_DEPENDS
              "${CMAKE_CURRENT_SOURCE_DIR}/io/dsi_font/TWLFontTable.dat"
              "${CMAKE_CURRENT_SOURCE_DIR}/io/dsi_font/TWLFontTable-cn.dat"
              "${CMAKE_CURRENT_SOURCE_DIR}/io/dsi_font/TWLFontTable-kr.dat")
+# The analog controls database is linked in the same way (cheat/analog_db.cpp).
+set_property(SOURCE cheat/analog_db.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+             DSPERATE_ANALOG_DB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/cheat/analog_db")
+set_property(SOURCE cheat/analog_db.cpp APPEND PROPERTY OBJECT_DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/cheat/analog_db/usrcheat-analog.dat")
 # The Vulkan device layer behind the frontend's dma-buf import presenter
 # (frontend/sdl/gpu_present.cpp). Opt-in at build time and at run time both:
 # libvulkan is loaded with dlopen, so a build with this on still starts on a
@@ -124,7 +137,24 @@ set_property(SOURCE io/dsi_font.cpp APPEND PROPERTY OBJECT_DEPENDS
 option(DSPERATE_VULKAN "Build the Vulkan dma-buf import presenter and the GPU 3D raster" ON)
 # Always compiled: without the headers they are stubs that decline, so the
 # renderer and the presenters build the same everywhere.
-target_sources(dsperate_core PRIVATE gpu/vk/vk_device.cpp gpu/vk/vk_lean.cpp)
+target_sources(dsperate_core PRIVATE gpu/vk/vk_device.cpp gpu/vk/vk_lean.cpp gpu/gpu_raster.cpp)
+# The OpenGL ES 3.1 raster (gpu/gl/gl_lean.cpp): libEGL / libGLESv2 are
+# dlopen'd and the GLSL ES sources linked in as text (gl_shaders.cpp), so it
+# builds everywhere with no headers; Raster3D::create tries it after Vulkan.
+option(DSPERATE_GLES "Build the OpenGL ES 3D raster (for devices without Vulkan)" ON)
+if(DSPERATE_GLES)
+  target_sources(dsperate_core PRIVATE gpu/gl/gl_api.cpp gpu/gl/gl_shaders.cpp gpu/gl/gl_lean.cpp)
+  set_property(SOURCE gpu/gl/gl_shaders.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+               DSPERATE_GL_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/gpu/gl/shaders"
+               DSPERATE_VK_DIR="${CMAKE_CURRENT_SOURCE_DIR}/gpu/vk")
+  file(GLOB DSPERATE_GL_GLSL "${CMAKE_CURRENT_SOURCE_DIR}/gpu/gl/shaders/*")
+  set_property(SOURCE gpu/gl/gl_shaders.cpp APPEND PROPERTY OBJECT_DEPENDS ${DSPERATE_GL_GLSL}
+               "${CMAKE_CURRENT_SOURCE_DIR}/gpu/vk/vk_layout.h" "${CMAKE_CURRENT_SOURCE_DIR}/gpu/vk/ds_shade.glsl" "${CMAKE_CURRENT_SOURCE_DIR}/gpu/vk/ds_spans.glsl")
+  target_compile_definitions(dsperate_core PUBLIC DSPERATE_GLES=1)
+  target_link_libraries(dsperate_core PUBLIC ${CMAKE_DL_LIBS})
+else()
+  target_sources(dsperate_core PRIVATE gpu/gl/gl_lean_stub.cpp)
+endif()
 if(DSPERATE_VULKAN)
   # The Vulkan headers are architecture-independent and nothing is linked
   # against (vk_device.cpp dlopens libvulkan on the device), so a cross build

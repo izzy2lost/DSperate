@@ -20,7 +20,7 @@
 namespace ds { struct NDS; }
 
 namespace ds::gpu {
-namespace vk { class Device; class Lean; }
+class Raster3D;
 
 class Gpu3D;
 struct Polygon;
@@ -70,13 +70,30 @@ public:
   // for it), 4x MSAA on the GPU raster. Coordinator only.
   void set_aa(bool on);
   bool aa() const { return aa_; }
+  // video.aa = enhanced: on the GPU raster the edge cut also cuts texture cut-out edges (the cut-out pass). Nothing on the CPU raster.
+  void set_aa_enhanced(bool on) { aa_enhanced_ = on; }
+  bool aa_enhanced() const { return aa_enhanced_; }
+  // The panel-density edge cut (core/gpu/edge_cut.h): beside each output
+  // line, the final pass writes an edge plane (FrameRef::edges), one word a
+  // pixel, zero where nothing is cut. An edge pixel the AA blend mixes keeps
+  // its blended colour in the output (captures and hashes see the exact
+  // frame) and records here what the present needs to cut it instead:
+  //   bits 0-17  its unblended colour, R G B 6 bits each (R lowest)
+  //   bits 18-22 its unblended alpha
+  //   bits 24-31 the edge byte: bit 7 edge, bit 6 the outside is the
+  //              negative neighbour (left / up), bit 5 the run's axis is
+  //              vertical (the outside above or below), bits 0-4 the
+  //              polygon's coverage, (cov + 1) / 32 of the pixel.
+  // Only where the game's own AA blends (phase 1). Coordinator only.
+  void set_edge_export(bool on) { edge_export_ = on; }
+  bool edge_export() const { return edge_export_; }
   // --dump-gpu-frame: write NDS frame `frame`'s polygon list in the GPU raster's layout
   // (vk_dump.h) to `path`; the frame is drawn on the CPU as usual.
   void set_gpu_dump(const char* path, u64 frame) { gpu_dump_path_ = path; gpu_dump_frame_ = frame; }
-  // The GPU 3D raster (vk_lean.h): the frame's polygon list drawn on the GPU
-  // at 1x with MSAA, one frame of lag allowed under load; a refused frame
-  // (texture arena full, list past the buffers) goes to the band workers.
-  // May decline (no Vulkan); `why` takes the reason. Coordinator only.
+  // The GPU 3D raster (gpu_raster.h: Vulkan, else OpenGL ES): the frame's
+  // polygon list drawn on the GPU at 1x, one frame of lag allowed under load;
+  // a refused frame (texture arena full, list past the buffers) goes to the
+  // band workers. May decline (no driver); `why` takes the reason. Coordinator only.
   bool set_gpu(bool on, std::string* why = nullptr);
   bool gpu_active() const { return gpu_on_; }
   // Internal resolution of the GPU raster (1-8; the CPU raster is always 1x).
@@ -86,6 +103,7 @@ public:
   // Bilinear texture filtering on the GPU raster (an enhancement; the DS
   // samples the nearest texel). Takes effect at the next frame.
   void set_gpu_tex_filter(bool on) { gpu_tex_filter_ = on; }
+  const char* gpu_api() const;   // the backend drawing (gpu_active()), else ""
 private:
   NDS& nds_;
   // Holds a whole chunk of scanlines at once (render_chunk draws chunk at a
@@ -98,7 +116,8 @@ private:
 
   // Colour: R 0-5, G 8-13, B 16-21, A 24-28.
   // Attr: bits 0-3 edge flags (L/R/T/B), bit 4 back-facing, bits 8-12 AA
-  // coverage, bit 15 fog, bits 16-21 translucent polygon id, bit 22
+  // coverage, bit 13 the edge run's outside is above/below (X-major) and
+  // bit 14 it is the up/left neighbour (both set only under edge export), bit 15 fog, bits 16-21 translucent polygon id, bit 22
   // translucent, bits 24-29 opaque polygon id.
   // Second half of each buffer: pixel underneath (AA). +8 words slack for
   // 8-lane resolve groups starting near the last ring row's end.
@@ -107,6 +126,7 @@ private:
   // display isn't reading (display_ ^ 1), letting compositing of frame N
   // continue past line 215 of frame N+1.
   std::array<u32, 256 * 192> out_[2]{};
+  std::array<u32, 256 * 192> edge_[2]{};   // the edge planes beside out_ (set_edge_export)
   u32 display_ = 0;
   std::array<u8, 256 * RING> stencil_{};   // one row per ring line
   // Per ring line: was the previous polygon drawn on it a shadow mask
@@ -223,7 +243,15 @@ private:
   const Gpu3D* gx_ = nullptr;
   const RenderState* rs_ = nullptr;
   bool game_aa_ = false;                  // AA blend runs (game asked and aa_ allows)
-  bool aa_ = true, aa_rendered_ = true;   // aa_rendered_: the setting the kept frame was drawn with
+  bool aa_ = true, aa_rendered_ = true;
+  bool aa_enhanced_ = false;   // aa_rendered_: the setting the kept frame was drawn with
+  bool edge_export_ = false, edge_rendered_ = false;   // see set_edge_export; edge_rendered_ as aa_rendered_
+  // The edge export's seam test reads the line above before its final pass
+  // touched it: saved here per line (raw_line_ is the line in raw_row_[0]).
+  alignas(16) u32 raw_row_[2][256] = {};
+  s32 raw_line_ = -100;
+  bool raw_prev_ = false;   // raw_row_ holds the line above the one in its final pass
+  void export_edges(s32 y);
   // rs_->dispcnt with bit 4 cleared when AA is off: kills the whole under
   // layer for the frame (AA blend, under-layer depth test, translucent plot,
   // fog, shadow stencil bit 2's under-layer writes).
@@ -269,6 +297,7 @@ private:
     s32 xdraw, lim0, lim1, lim2;
     s32 l_cov, r_cov;
     int yedge;
+    u16 l_dir, r_dir;   // attr bits 13-14 of the edge runs (edge export only)
     bool l_fill, r_fill, wf_skip;
   };
   std::array<SpanJob, 256> jobs_{};
@@ -284,6 +313,7 @@ private:
     s32 l_len, r_len, l_cov, r_cov;
     s32 xa, xb;              // the clipped screen range [xa, xb)
     int yedge;
+    u16 l_dir, r_dir;        // attr bits 13-14 of the edge runs (edge export only)
     bool l_fill, r_fill, wf_skip;
   };
   std::array<LineSpan, CHUNK> lines_{};
@@ -328,6 +358,22 @@ private:
   // scanlines [max(ytop, 0), min(ybot, 191)]: the per-line endpoints precompute_lines derives.
   // Returns the rows written, 0 if `cap` rows would not hold them.
   u32  gpu_span_rows(const Polygon& p, u32* out, u32 cap);
+  // The span table's rows for one GPU frame, walked on the band pool (idle
+  // while the GPU draws) and this thread together: the emulation thread
+  // only lays out where each polygon's rows go. `jobs` pairs a polygon with
+  // its first row; the output is the same as walking them in order here.
+  struct SpanRowsJob { const Polygon* poly; u32 row; };
+  void gpu_walk_spans(size_t a, size_t b);
+  void gpu_spans_start(u32 rows, u32* spans);   // emulation thread
+  void gpu_spans_finish(u32 rows);              // job thread
+  u32* span_dst_ = nullptr;
+  std::vector<u32> span_cut_;   // chunk bounds, MAX_BINS + 1
+  u32 span_nchunks_ = 0;
+  u64 span_gen_ = 0;
+  bool span_pending_ = false, span_serial_ = false;
+  mutable bool capture_hint_ = false;   // the last display frame allowed no lag (display capture): see gpu_spans_start
+  std::vector<SpanRowsJob> span_jobs_;
+  std::function<void(u32)> span_fn_;   // the pool keeps a reference until wait_idle
   void rewind_edge(Edge& e);
   void refresh_edge_state(Edge& e) const;   // called from both edge setups and once per polygon for the flat case
   void setup_shade(Shade& sh, const Polygon& p);
@@ -356,7 +402,7 @@ private:
   // range it emits, since the final pass reads two neighbours.
   void build_edges();   // from list_polys_ / list_count_, latched by render() or prepare_worker
   void seed_active(s32 y);
-  void render_band(s32 y0, s32 y1, u32* dst);
+  void render_band(s32 y0, s32 y1, u32* dst, u32* edst);
   void prepare_worker(const Gpu3D& gx, const Polygon* const* polys, u32 npoly, const std::vector<const u32*>* texels, const RenderState* rs);
   RenderState rs_frame_;   // coordinator's copy; the engine's own may be rewritten at the next VBlank mid-raster
   static u32 band_count(u32 polygons);
@@ -387,11 +433,15 @@ public:
     mutable const u32* hi = nullptr;
     mutable const void* hi_buffer = nullptr;   // or the same picture as an AHardwareBuffer (vk::Lean::hires_buffer_of)
     mutable u32 hi_scale = 1;
+    const u32* edges = nullptr;   // the edge plane (set_edge_export), or null
+    mutable const u8* edge_bytes = nullptr;   // a GPU frame's edge bytes instead (Raster3D::edges_for), picked with its record
     bool gpu = false, allow_lag = true;
     u64 gen = 0;
+    u64 gpu_gen = 0;   // the GPU submit this frame was rendered with (Raster3D::frame_ready)
     u32 nbins = 0;
     std::array<s32, MAX_BINS + 1> bin_y{};
     const u32* line(u32 y) const { return out + y * 256; }
+    const u32* edge_line(u32 y) const { return edges ? edges + y * 256 : nullptr; }
   };
   // `allow_lag`: a GPU frame not finished yet may be stood in for by the one
   // before it (one frame of 3D latency instead of a stall); a display-capture
@@ -407,6 +457,7 @@ private:
 
   u32  edge_count_ = 0;
   u32* out_dst_ = nullptr;                              // where final_pass writes
+  u32* out_edge_dst_ = nullptr;                         // where it writes the edge plane (null: not exporting)
   const std::vector<const u32*>* texels_in_ = nullptr;  // decoded textures per polygon (render() records them)
   // Latched once by the coordinator after sync_all and handed to every band;
   // workers never read the engine's live list (SWAP can finalise the next
@@ -418,27 +469,35 @@ private:
   std::vector<const u32*> poly_texels_;
   const char* gpu_dump_path_ = nullptr; u64 gpu_dump_frame_ = ~u64{0};
   void gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npoly);
-  std::shared_ptr<vk::Device> vk_dev_;
-  std::unique_ptr<vk::Lean> lean_;
-  std::unique_ptr<vk::Lean> lean_retired_;   // the Lean gpu_rebuild() replaced, kept one frame for readers of its record
+  std::unique_ptr<Raster3D> lean_;
+  std::unique_ptr<Raster3D> lean_retired_;   // the Lean gpu_rebuild() replaced, kept one frame for readers of its record
   bool lean_aa_ = false;   // the AA setting lean_ was created for (msaa() is what the device granted)
   u32 gpu_scale_ = 1;      // the internal resolution asked for; lean_->scale() is the one it has
+  u32 lean_scale_ = 1;     // the gpu_scale_ lean_ was created for (a backend without scaling draws at 1x)
   bool gpu_tex_filter_ = false;
+  bool lean_edges_ = false;   // lean_ draws the edge plane (in place of MSAA)
+  bool gpu_edges() const { return aa_ && edge_export_ && gpu_scale_ == 1; }   // the GPU raster's AA is the edge cut (1x only)
   void gpu_rebuild();
   // The GPU submit (command recording + queue call, ~0.9 ms) runs on its own
   // thread, off the emulation thread: gpu_submit() fills the staging buffers
   // and the texel arena, then posts the Lean::submit call. gpu_job_wait()
   // before anything that reads the result or rewrites the staging.
-  struct GpuJob { std::thread thread; std::mutex m; std::condition_variable cv; bool pending = false, quit = false, ok = false; u32 np = 0, nv = 0, ntex = 0; vk::GpuFrame f{}; };
+  // The span-table walk (~3 ms on an A53) runs before the submit on the
+  // job thread, or on the emulation thread for capture frames
+  // (gpu_spans_start / gpu_spans_finish): span_jobs_ names the raster
+  // bank's polygons, which Gpu3D holds until sync_all() has seen the job done.
+  struct GpuJob { std::thread thread; std::mutex m; std::condition_variable cv; bool pending = false, quit = false, ok = false; u32 np = 0, nv = 0, ntex = 0, rows = 0; vk::GpuFrame f{}; };
   std::unique_ptr<GpuJob> gpu_job_;
   void gpu_job_start();
-  void gpu_job_post(u32 np, u32 nv, u32 ntex, const vk::GpuFrame& f);
+  void gpu_job_post(u32 np, u32 nv, u32 ntex, u32 rows, const vk::GpuFrame& f);
   bool gpu_job_wait();   // the last posted submit's result (true: on the GPU)
   bool gpu_on_ = false;
   bool gpu_frame_ = false;   // the last drawn frame went to the GPU: lean_ holds the picture, not out_[]
+  u64 gpu_gen_ = 0;          // GPU submits posted (the last frame's is gpu_gen_)
   struct GpuResident { u32 off = 0, words = 0, version = 0; };
   std::unordered_map<u32, GpuResident> gpu_resident_;   // decoded texture (cache id) -> arena offset
   u32 gpu_arena_top_ = 0;
+  std::vector<u32> gpu_scratch_;   // a decoded texture while its alpha-edge flags are marked (gpu_submit)
   bool gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 npoly);   // false: draw on the CPU instead
   std::vector<std::unique_ptr<Renderer3D>> bands_;      // workers 1..n-1 (band 0 is this)
   u64 band_ns_[8] = {};                                 // last frame's per-band wall time (workers write their own slot)
@@ -464,7 +523,8 @@ private:
     std::array<s32, MAX_BINS + 1> bin_y{};
     u32 nbins = 0;
     u32* dst = nullptr;
-    bool aa = false;
+    u32* edst = nullptr;
+    bool aa = false, edge_export = false;
   };
   DispatchCtx ctx_[2];
   struct StealBand { std::unique_ptr<Renderer3D> band; std::atomic<bool> busy{false}; u64 gen = ~u64{0}; };

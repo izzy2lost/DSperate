@@ -132,6 +132,11 @@ struct GpuFrame {
   uint   nrows;         // span rows this frame, all polygons: the span pass is one lane per row
   uint   flags;         // DS_FF_*
   uint   flags2;        // DS_FF2_* (flags is full: bits 16-31 are the shadow run)
+  // GL raster, W-buffered frames under DS_WCLIP: the clip z carries
+  // wscale / w (float bits), wscale a little under the frame's nearest w, so
+  // the scene fills the clip range and the far end keeps its precision.
+  uint   wscale;
+  uint   pad2_[2];
 };
 
 #define DS_FF_WBUFFER 0x1u   // frame depth-tests on W (SWAP_BUFFERS bit 1); triangle path picks pipelines by it
@@ -145,7 +150,8 @@ struct GpuFrame {
 // record to the edge plane instead of blending; present stage splits it.
 #define DS_FF2_SMOOTH  0x1u
 #define DS_FF2_MSAA    0x2u   // 4x MSAA: vertices on pixel corners, so coverage is the polygon's true area
-#define DS_FF2_TEXFILTER 0x4u // lean raster: bilinear texture filtering (an enhancement; the DS samples the nearest texel)
+#define DS_FF2_CUTOUT  0x4u   // the edge cut's cut-out pass (video.aa = enhanced): texture cut-out edges too
+#define DS_FF2_TEXFILTER 0x8u // lean raster: bilinear texture filtering (an enhancement; the DS samples the nearest texel)
 
 // Render state too large for push constants (fog table, edge colours, toon
 // table). Uploaded every frame, 320 bytes, cheaper than tracking changes.

@@ -95,6 +95,18 @@ void dim_framebuffer(u32* px, u32 n);
 // Small centred panel with a title, a second line, and a dim third one: the
 // "unpacking" notice a first launch of a zipped game shows.
 void draw_notice(const Canvas& d, const char* title, const char* line2, const char* line3);
+// A selected name too long for its row scrolls sideways: still for half a
+// second, then 26 px/s, a pause at the end, then back. How far it has
+// scrolled `ms` after the selection last moved, for `overflow` px too many.
+int marquee_px(int overflow, u32 ms);
+// A modal list the frontend runs before a game starts (the slot-2 GBA
+// cartridge prompt): `title`, a dim `note`, one row per choice, then a
+// checkbox row and a `hint` line. `selected` is a choice's index, or
+// rows.size() for the checkbox. The list scrolls to keep it in view; a
+// selected name too long for its row runs as a marquee, `marquee_ms` after
+// the selection last moved. True when it does, so the caller keeps drawing.
+bool draw_picker(const Canvas& d, const char* title, const char* note, const std::vector<std::string>& rows, int selected, bool remember,
+                 const char* remember_label, const char* hint, u32 marquee_ms);
 
 // Achievement unlock, bottom-right corner (game keeps playing behind it, DS
 // picture is centred). Sizes to its text up to two thirds of the canvas,
@@ -196,7 +208,7 @@ private:
   // A page stack rather than a flat state, so B pops wherever pressed. Games
   // is pushed onto an empty stack, since it has nothing behind it and B does
   // not leave it.
-  enum class Page : u8 { Root, Slot, Cheats, Games, Options, Emulation, VisualFx, Layout, Controls, DsOptions, TextEdit, Cheevos, CheevosAccount };
+  enum class Page : u8 { Root, Slot, Cheats, Games, Options, Emulation, VisualFx, Layout, Controls, Analog, DsOptions, TextEdit, Cheevos, CheevosAccount };
   static constexpr int kMaxDepth = 6;
   Page stack_[kMaxDepth] = {Page::Root};
   int  depth_ = 1;
@@ -219,6 +231,7 @@ private:
   const std::vector<cheat::Group>* groups_ = nullptr;
   std::vector<Line> lines_;      // the cheats page, headings and all
   int  cheat_row_ = 0;           // index into lines_
+  bool cheats_analog_ = false;   // the page lists the analog codes, not the others
   int  cheat_top_ = 0;           // first line shown, for scrolling
   bool cheats_dirty_ = false;
 
@@ -228,9 +241,6 @@ private:
   std::string chosen_;           // the path Result::Launch names
 
   static constexpr u32 kRepeatDelayMs = 400, kRepeatRateMs = 55;
-  // A selected name too long for the panel scrolls sideways: still for half
-  // a second, then 26 px/s, pause at the end, then snaps back.
-  static constexpr u32 kMarqueeDelayMs = 500, kMarqueeHoldMs = 900, kMarqueePxPerSec = 26;
 
   bool dirty_ = false;
   int  repeat_dir_ = 0;          // -1 up, +1 down, 0 nothing held
@@ -247,7 +257,7 @@ private:
   // canvas, so it's measured there like the marquee. Initial value only
   // matters if a key is pressed before the first draw.
   mutable int visible_ = 12;
-  bool have_cheats() const { return codes_ && !codes_->empty(); }
+  bool have_cheats(bool analog) const;
   // Root page hides the cheats row when empty, so screen rows != table rows.
   bool root_visible(int item) const;
   int root_rows() const;
@@ -256,13 +266,17 @@ private:
   // One row per page, kept while the menu is open so backing out and back in
   // lands where it was left.
   int  opt_row_ = 0;
-  int  set_row_[4] = {};         // Emulation, VisualFx, Layout, DsOptions
-  mutable int set_top_[4] = {};  // written by draw; scroll depends on canvas rows fitted
+  int  set_row_[5] = {};         // Emulation, VisualFx, Layout, DsOptions, Analog
+  mutable int set_top_[5] = {};  // written by draw; scroll depends on canvas rows fitted
   bool have_options() const { return host_ != nullptr; }
   bool have_states() const { return !net_session_; }
   // The table a settings page shows, and where its row state lives.
   const Setting* table() const;
   int  table_slot() const;
+  // The Analog page opens with a link to its cheats when the game has any;
+  // setting_row() gives null for that row.
+  int  link_rows() const;
+  const Setting* setting_row(int row) const;
   // Skips rows the host switched off. False when nothing selectable in that
   // direction, leaving the selection where it was.
   bool move_setting_row(int delta);
@@ -311,13 +325,14 @@ private:
   mutable int bind_top_ = 0;
   void move_bind_row(int delta);
   void build_lines();
+  void open_cheats(bool analog);
   void move_cheat_row(int delta);
   void move_game_row(int delta);
   // Scrolling pages share repeat/marquee timing, keyed off "has the
   // selection moved"; this is that selection.
   int  list_row() const;
   bool list_page() const { return page() == Page::Cheats || page() == Page::Games || settings_page() || controls_page(); }
-  bool settings_page() const { return page() == Page::Emulation || page() == Page::VisualFx || page() == Page::Layout || page() == Page::DsOptions; }
+  bool settings_page() const { return page() == Page::Emulation || page() == Page::VisualFx || page() == Page::Layout || page() == Page::DsOptions || page() == Page::Analog; }
   bool controls_page() const { return page() == Page::Controls; }
   void toggle_cheat();
 };

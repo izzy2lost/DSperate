@@ -3,6 +3,7 @@
 //
 // Headless frontend: boots the BIOS/firmware (and optionally a ROM), runs N
 // frames, optionally tracing instructions or dumping frames/audio.
+#include "core/gpu/edge_cut.h"
 #include "core/nds.h"
 #include "core/cpu/timing_mode.h"
 #include "core/pc_sampler.h"
@@ -241,15 +242,18 @@ int main(int argc, char** argv) {
   int scaled_n = 0; const char* scaled_path = nullptr;
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *hash_frames = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
   const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
+  const char *gba_rom = nullptr, *gba_save = nullptr, *gba_save_out = nullptr; int gba_light = 5; bool rumble_pak = false, guitar_grip = false;
   const char* hide_screen = nullptr;
   int frameskip = 0;    // --frameskip N: skip drawing N of every N+1 frames (fixed; the SDL frontend also has the adaptive mode)
   bool frameskip_capture = false;
   int stats_from = 0;   // --stats-from N: first frame counted in the timing statistics
   const char* pc_profile = nullptr;
   int dump_from = 0, dump_count = 0;   // --dump-from/--dump-count: window of a large dump
+  int cut_n = 0; const char* cut_path = nullptr;   // --dump-cut
   long gpu_dump_frame = -1; const char* gpu_dump_path = nullptr;   // --dump-gpu-frame
   const char* rec3d_path = nullptr;   // --dump-3d
   bool gpu3d = false;   // --gpu3d
+  bool aa_enhanced = false;   // --aa-enhanced: video.aa = enhanced (the GPU raster's cut-out pass)
   int frames = 60; bool direct = false;
 #if DSPERATE_JIT
   bool jit = true;                    // both CPUs; --interp clears it
@@ -262,6 +266,7 @@ int main(int argc, char** argv) {
   bool no_aa = false;
   bool frames_given = false;
   const char* cheat_db = nullptr;      // a usrcheat.dat to load this ROM's codes from
+  const char* analog_db = nullptr;     // the analog controls database; null: the built-in one
   const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; bool dsi_nand_write = false; const char* dsi_persist = nullptr; const char* dsi_install = nullptr; bool dsi_hide_installed = false; const char* dsi_tmd = nullptr; bool dsi_offline = false; bool dsi_autoload = false; bool dsi_hle = false; ds::u32 dsi_title_lo = 0; ds::bios::UserSettings user; const char* dsi_font = nullptr; const char* dsi_sd = nullptr; ds::u64 dsi_autoload_id = 0; const char* dsi_shortcuts = nullptr; bool dsi_shortcuts_on = true;
   int dsi_mode = -1;                   // -1 auto
   bool list_cheats = false;
@@ -324,6 +329,7 @@ int main(int argc, char** argv) {
     else if (arg("--trace")) trace = argv[++i];
     else if (arg("--max")) ts.max = std::strtoull(argv[++i], nullptr, 0);
     else if (arg("--dump-frames")) dump = argv[++i];
+    else if (arg("--dump-cut")) { cut_n = std::atoi(argv[++i]); cut_path = argv[++i]; }   // N FILE: both screens through the edge cut (core/gpu/edge_cut.h) at Nx, raw 0xAARRGGBB
     else if (arg("--dump-3d")) rec3d_path = argv[++i];   // FILE: the 3D layer record as the compositor reads it (256x192 words: RGB666 + 5-bit alpha in 24-28), for the --dump-from/--dump-count frames
     else if (arg("--dump-gpu-frame")) { gpu_dump_frame = std::atol(argv[++i]); gpu_dump_path = argv[++i]; }   // N FILE: frame N's polygon list in the GPU raster's layout (vk_dump.h)
 
@@ -334,7 +340,14 @@ int main(int argc, char** argv) {
     else if (arg("--dump-audio")) dump_audio = argv[++i];   // raw s16 stereo, 32768 Hz
     else if (arg("--replay")) replay = argv[++i];           // inputs recorded by dsperate-sdl --record; sets --frames to its length unless given
     else if (arg("--save")) save = argv[++i];               // battery save to start from; loaded read-only, never written back
+    else if (arg("--gba-rom")) gba_rom = argv[++i];         // a GBA game in slot 2 (DS mode only)
+    else if (arg("--gba-save")) gba_save = argv[++i];       // its save, read-only like --save; default none
+    else if (arg("--gba-save-out")) gba_save_out = argv[++i];   // at exit, the GBA save as the run left it (for checking what a game wrote)
+    else if (arg("--gba-light")) gba_light = std::atoi(argv[++i]);   // Boktai solar sensor, 0 (dark) to 10
+    else if (flag("--rumble-pak")) rumble_pak = true;       // the DS Rumble Pak in slot 2; motor changes are counted at exit
+    else if (flag("--guitar-grip")) guitar_grip = true;     // the Guitar Hero Grip in slot 2; frets come from --replay records
     else if (arg("--cheats")) cheat_db = argv[++i];         // usrcheat.dat; the entry matching this ROM is loaded
+    else if (arg("--analog-cheats")) analog_db = argv[++i]; // usrcheat-analog.dat (exact ROM match only); default the built-in one, "none" for no analog codes
     else if (flag("--list-cheats")) list_cheats = true;     // print them (with their index) and exit
     else if (arg("--cheat")) enable_cheats.push_back(argv[++i]);   // enable one by name, or by "#N" from --list-cheats
     else if (!std::strcmp(argv[i], "--direct")) direct = true;
@@ -344,7 +357,8 @@ int main(int argc, char** argv) {
     else if (flag("--rtc-host")) rtc_host = true;                            // INEXACT by construction: runs stop being reproducible
     else if (arg("--firmware-override")) fw_override = argv[++i];            // load it, and write back what the firmware changed
     else if (flag("--no-aa")) no_aa = true;                                  // 3D anti-aliasing off (Renderer3D::set_aa); inexact, for measurement
-    else if (flag("--gpu3d")) gpu3d = true;   // the 3D layer on the GPU (Renderer3D::set_gpu, vk_lean.h); declines to the CPU without Vulkan
+    else if (flag("--aa-enhanced")) aa_enhanced = true;
+    else if (flag("--gpu3d")) gpu3d = true;   // the 3D layer on the GPU (Renderer3D::set_gpu, gpu_raster.h: Vulkan, else OpenGL ES); declines to the CPU without a driver
     else if (arg("--load-state")) load_state = argv[++i];                   // restore a save state before running
     else if (arg("--frameskip")) frameskip = std::atoi(argv[++i]);          // skip drawing N of every N+1 frames (Gpu::set_frame_skip); a dump of a skipped frame is stale
     else if (flag("--frameskip-capture")) frameskip_capture = true;          // INEXACT: skip frames that display-capture too
@@ -512,6 +526,7 @@ int main(int argc, char** argv) {
     }
   }
   nds.gpu3d.renderer().set_aa(!no_aa);
+  nds.gpu3d.renderer().set_aa_enhanced(aa_enhanced);
   std::vector<ds::u32> scaled_px[2]; std::vector<ds::u16> scaled_xrun; FILE* scaled_out = nullptr;
   if (scaled_n > 0 && scaled_path) {
     const ds::u32 W = ds::SCREEN_W * scaled_n, H = ds::SCREEN_H * scaled_n;
@@ -526,18 +541,38 @@ int main(int argc, char** argv) {
     if (!scaled_out) { std::fprintf(stderr, "could not open %s\n", scaled_path); return 1; }
   }
 
-  if (rom && cheat_db) {
+  if (rom && (cheat_db || analog_db || list_cheats || !enable_cheats.empty())) {
     ds::cheat::GameCheats found;
     std::string err;
     // From the loaded cart, so a zipped ROM is looked up by the game's header.
     ds::u8 header[512] = {};
     if (nds.cart) nds.cart->rom_read(0, header, sizeof header);
-    if (!ds::cheat::load_for_header(cheat_db, header, found, err)) {
-      if (!err.empty()) { std::fprintf(stderr, "cheats: %s\n", err.c_str()); return 1; }
-      std::fprintf(stderr, "cheats: this ROM is not in %s\n", cheat_db);
+    bool have = false;
+    if (cheat_db) {
+      if (ds::cheat::load_for_header(cheat_db, header, found, err)) have = true;
+      else if (!err.empty()) { std::fprintf(stderr, "cheats: %s\n", err.c_str()); return 1; }
+      else std::fprintf(stderr, "cheats: this ROM is not in %s\n", cheat_db);
+      if (!err.empty()) std::fprintf(stderr, "cheats: %s\n", err.c_str());
+    }
+    // The analog codes as the SDL frontend merges them: this exact ROM only.
+    if (!analog_db || std::strcmp(analog_db, "none") != 0) {
+      ds::cheat::GameCheats analog;
+      std::string aerr;
+      if (ds::cheat::load_analog_for_header(analog_db ? analog_db : "", header, analog, aerr)) {
+        if (found.name.empty()) found.name = analog.name;
+        if (ds::cheat::merge_analog(found, std::move(analog), ds::cheat::header_checksum(header))) {
+          have = true;
+          std::fprintf(stderr, "cheats: analog codes from %s\n", analog_db ? analog_db : "the built-in database");
+        }
+      } else if (!aerr.empty()) {
+        std::fprintf(stderr, "cheats: %s\n", aerr.c_str());
+        return 1;
+      }
+    }
+    if (!have) {
+      std::fprintf(stderr, "cheats: no codes for this ROM\n");
       if (list_cheats) return 0;
     } else {
-      if (!err.empty()) std::fprintf(stderr, "cheats: %s\n", err.c_str());
       std::fprintf(stderr, "cheats: %s -- %zu codes in %zu groups\n",
                    found.name.c_str(), found.codes.size(), found.groups.size());
       if (list_cheats) {
@@ -549,6 +584,7 @@ int main(int argc, char** argv) {
         return 0;
       }
       nds.cheats.codes = std::move(found.codes);
+      nds.cheats.forget_writes();
       // "#N" is the listing's index -- needed since names can repeat within a game.
       for (const std::string& want : enable_cheats) {
         bool hit = false;
@@ -562,6 +598,11 @@ int main(int argc, char** argv) {
       }
       size_t on = 0;
       for (const ds::cheat::Code& c : nds.cheats.codes) if (c.enabled) ++on;
+      // A replay carries stick data for an analog code's hook.
+      const ds::cheat::AnalogRequest analog = ds::cheat::analog_request(nds.cheats.codes);
+      nds.analog_patch = analog.schemes > 0;
+      nds.analog_full = analog.nub;
+      if (analog.extended) nds.analog_layout = ds::NDS::AnalogLayout::Extended;
       std::fprintf(stderr, "cheats: %zu enabled\n", on);
     }
   }
@@ -580,6 +621,21 @@ int main(int argc, char** argv) {
     if (!(nds.dsi && nds.dsi_nand_boot && lo)) { std::fprintf(stderr, "--dsi-autoload needs a NAND boot and --dsi-install or --dsi-autoload-id\n"); return 1; }
     nds.dsi_autoload(lo, hi);
     std::fprintf(stderr, "dsi: autoload %08x%08x (TLNC)\n", hi, lo);
+  }
+  if (gba_rom || rumble_pak || guitar_grip) {
+    if ((gba_rom != nullptr) + rumble_pak + guitar_grip > 1) { std::fprintf(stderr, "--gba-rom, --rumble-pak and --guitar-grip each want slot 2\n"); return 2; }
+    if (nds.dsi) std::fprintf(stderr, "slot2: a DSi has no slot 2; ignored\n");
+    else if (rumble_pak) { nds.slot2 = std::make_unique<ds::slot2::RumblePak>(); std::fprintf(stderr, "slot2: Rumble Pak\n"); }
+    else if (guitar_grip) { nds.slot2 = std::make_unique<ds::slot2::GuitarGrip>(); std::fprintf(stderr, "slot2: Guitar Grip\n"); }
+    else {
+      std::string err;
+      std::unique_ptr<ds::slot2::GameCart> g = ds::slot2::load_game(gba_rom, gba_save ? gba_save : "", err);
+      if (!g) { std::fprintf(stderr, "slot2: %s\n", err.c_str()); return 1; }
+      g->set_light_level(gba_light);
+      std::fprintf(stderr, "slot2: %s [%s], save %s%s\n", g->title(), g->game_code(), ds::slot2::save_type_name(g->save_type()),
+                   g->solar_sensor() ? ", solar sensor" : "");
+      nds.slot2 = std::move(g);
+    }
   }
   // Never written back -- this is a harness.
   if (save && nds.cart) {
@@ -614,6 +670,13 @@ int main(int argc, char** argv) {
   if (dump && !dump_out) { std::fprintf(stderr, "could not open %s\n", dump); return 1; }
   if (gpu_dump_path && gpu_dump_frame >= 0) nds.gpu3d.renderer().set_gpu_dump(gpu_dump_path, static_cast<ds::u64>(gpu_dump_frame));
   if (gpu3d) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); }
+  FILE* cut_out = nullptr; std::vector<ds::u32> cut_px;
+  if (cut_n > 0 && cut_path) {
+    cut_out = std::fopen(cut_path, "wb");
+    if (!cut_out) { std::fprintf(stderr, "could not open %s\n", cut_path); return 1; }
+    cut_px.resize(static_cast<size_t>(256 * cut_n) * static_cast<size_t>(192 * cut_n));
+    nds.gpu.set_edge_export(true);
+  }
   FILE* hash_out = hash_frames ? std::fopen(hash_frames, "w") : nullptr;
   if (hash_frames && !hash_out) { std::fprintf(stderr, "could not open %s\n", hash_frames); return 1; }
   ds::input::Log log;
@@ -656,8 +719,10 @@ int main(int argc, char** argv) {
     if (bytes.empty() || !nds.load_state(r, err)) { std::fprintf(stderr, "cannot load state %s: %s\n", load_state, bytes.empty() ? "unreadable" : err.c_str()); return 1; }
     std::fprintf(stderr, "state: loaded %s (frame %llu)\n", load_state, static_cast<unsigned long long>(nds.frame_count));
     dump_cpu_timing(nds, "load");
-    // replay continues from the state's frame, not the log's start
-    if (log.reading()) { ds::input::Frame f; for (ds::u64 k = 0; k < nds.frame_count && log.read(f); ++k) {} }
+    // replay continues from the state's frame: a log made from this state starts there,
+    // one from boot winds forward to it
+    if (log.reading() && !log.wind_to(nds.frame_count))
+      std::fprintf(stderr, "replay: the log starts at frame %u, after this state's %llu; it will not line up\n", log.start(), static_cast<unsigned long long>(nds.frame_count));
   }
   auto write_state = [&](int after) {
     if (!save_state_path || save_state_at != after) return true;
@@ -821,6 +886,14 @@ int main(int argc, char** argv) {
     }
     if (scaled_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count))
       for (int k = 0; k < 2; ++k) std::fwrite(scaled_px[k].data(), 4, scaled_px[k].size(), scaled_out);
+    if (cut_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count))
+      for (int k = 0; k < 2; ++k) {
+        ds::gpu::edge_cut_screen(nds.gpu.framebuffer(k), nds.gpu.edge_plane(k), cut_n, cut_px.data(), std::getenv("DS_EDGE_BLEND") ? static_cast<float>(std::atof(std::getenv("DS_EDGE_BLEND"))) : 1.0f);
+        std::fwrite(cut_px.data(), 4, cut_px.size(), cut_out);
+      }
+    if (cut_out && std::getenv("DS_DUMP_EDGE") && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count)) {   // DS_DUMP_EDGE=FILE with --dump-cut: the top screen's edge plane words (Renderer3D::set_edge_export) of the last dumped frame
+      FILE* ef = std::fopen(std::getenv("DS_DUMP_EDGE"), "wb"); std::fwrite(nds.gpu.edge_plane(0), 4, 256 * 192, ef); std::fclose(ef);
+    }
     if (dump_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count)) {
       // raw 0xAARRGGBB, top screen then bottom, 256x192 each, one record per frame
       std::fwrite(nds.gpu.framebuffer(0), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);
@@ -876,6 +949,7 @@ int main(int argc, char** argv) {
     else std::fprintf(stderr, "firmware override: saved %s\n", fw_override);
   }
   if (dump_out) std::fclose(dump_out);
+  if (cut_out) std::fclose(cut_out);
   if (hash_out) std::fclose(hash_out);
   if (scaled_out) std::fclose(scaled_out);
   if (audio_out) std::fclose(audio_out);
@@ -930,6 +1004,14 @@ int main(int argc, char** argv) {
                                                             {d, nds.dsi_nand_synthetic ? std::string() : d + "/nand.ovr", d + "/photos"});
     std::fprintf(stderr, "dsi persist: out %d saves, %d system files, %d photos\n", r.saves, r.system_files, r.photos);
     for (const std::string& n : r.notes) std::fprintf(stderr, "dsi persist: %s\n", n.c_str());
+  }
+  if (nds.slot2 && nds.slot2->kind() == ds::slot2::Kind::RumblePak) std::fprintf(stderr, "slot2: %u rumble changes\n", nds.slot2->rumble_events());
+  if (const ds::slot2::GameCart* g = nds.gba_cart(); g && g->save_writes())
+    std::fprintf(stderr, "slot2: %u GBA save writes (not written back)\n", g->save_writes());
+  if (const ds::slot2::GameCart* g = nds.gba_cart(); g && gba_save_out) {
+    std::string err;
+    if (ds::slot2::write_save(*g, gba_save_out, err)) std::fprintf(stderr, "slot2: wrote the GBA save to %s\n", gba_save_out);
+    else std::fprintf(stderr, "slot2: %s\n", err.c_str());
   }
   std::fprintf(stderr, "ran %llu frames, %llu cycles\n",
               static_cast<unsigned long long>(nds.frame_count),

@@ -43,6 +43,9 @@ enum class Dep : u8 {
   // a peer or server instead of the emulator.
   NetSession,
   ShortcutsPath,      // a folder for NAND title shortcuts: paths.dsi_games, else paths.games
+  Slot2Link,          // the game reads GBA games (slot2/compat.h), and paths.gba_games is set
+  RumblePak,          // the Rumble Pak is in slot 2 this session
+  SolarSensor,        // a Boktai cartridge is in slot 2
 };
 
 struct Setting {
@@ -107,6 +110,7 @@ constexpr const char* kLayoutCyclePrefix = "video.layout_cycle.";
 
 // The pages. Each is terminated by a row with a null key.
 extern const Setting kEmuSettings[];
+extern const Setting kAnalogSettings[];
 extern const Setting kVideoSettings[];
 extern const Setting kLayoutSettings[];
 extern const Setting kUserSettings[];

@@ -31,6 +31,7 @@ namespace ds::gpu::vk {
   F(vkCreateShaderModule) F(vkDestroyShaderModule) \
   F(vkCreateDescriptorSetLayout) F(vkDestroyDescriptorSetLayout) \
   F(vkCreatePipelineLayout) F(vkDestroyPipelineLayout) \
+  F(vkCreatePipelineCache) F(vkDestroyPipelineCache) F(vkGetPipelineCacheData) \
   F(vkCreateComputePipelines) F(vkDestroyPipeline) \
   F(vkCreateDescriptorPool) F(vkDestroyDescriptorPool) \
   F(vkAllocateDescriptorSets) F(vkUpdateDescriptorSets) \
@@ -76,6 +77,9 @@ struct DeviceInternal {
   VkDeviceSize     non_coherent_atom = 1;
   // vkGetAndroidHardwareBufferPropertiesANDROID where Limits::ahb_import, else null.
   PFN_vkVoidFunction get_ahb_properties = nullptr;
+  // Every pipeline is created through this cache (Device::set_pipeline_cache_file);
+  // VK_NULL_HANDLE when there is none. Internally synchronised.
+  VkPipelineCache  pcache = VK_NULL_HANDLE;
 };
 
 inline VkBuffer vk_buf(const Buffer& b) { return reinterpret_cast<VkBuffer>(b.handle); }

@@ -22,6 +22,7 @@ const Choice kIntScale[] = {{"off", "OFF"}, {"under", "UNDER"}, {"over", "OVER"}
 const Choice kSeam[]     = {{"dark", "DARK"}, {"blend", "BLEND"}, {"blend_linear", "BLEND LINEAR"}};
 const Choice kChunky[]   = {{"false", "OFF"}, {"mean", "DEFAULT"}, {"extreme", "ADAPTIVE"},
                             {"mode", "COMMON"}, {"tl", "FIRST"}, {"min", "DARKEST"}, {"max", "LIGHTEST"}};
+const Choice kAa[]       = {{"false", "OFF"}, {"true", "ON"}, {"enhanced", "ENHANCED"}};
 const Choice kScreen[]   = {{"top", "TOP"}, {"bottom", "BOTTOM"}};
 // GBATEK's order, matching the firmware.
 const Choice kColour[]   = {{"0", "GREY"}, {"1", "BROWN"}, {"2", "RED"}, {"3", "PINK"},
@@ -42,6 +43,9 @@ const Choice kWifiDns[]  = {{"wiimmfi", "WIIMMFI"}, {"host", "HOST"}};
 const Choice kLanguage[] = {{"0", "JAPANESE"}, {"1", "ENGLISH"}, {"2", "FRENCH"},
                             {"3", "GERMAN"}, {"4", "ITALIAN"}, {"5", "SPANISH"}};
 const Choice kCheck[]    = {{"false", "[ ]"}, {"true", "[X]"}};
+const Choice kRumble[]   = {{"auto", "AUTO"}, {"on", "ON"}, {"off", "OFF"}};
+const Choice kAnalog[]   = {{"auto", "AUTO"}, {"off", "OFF"}, {"left", "LEFT STICK"}, {"right", "RIGHT STICK"}, {"dual", "TWO STICKS"}};
+const Choice kAnalogLayout[] = {{"auto", "AUTO"}, {"packed", "PACKED"}, {"extended", "EXTENDED"}};
 const Choice kLayout[]   = {{"vertical", "VERTICAL"}, {"horizontal", "HORIZONTAL"}, {"single", "SINGLE"},
                             {"pip", "PIP"}, {"dominant_v", "DOMINANT V"}, {"dominant_h", "DOMINANT H"}};
 const Choice kCorner[]   = {{"tl", "TOP LEFT"}, {"tr", "TOP RIGHT"}, {"bl", "BOTTOM LEFT"}, {"br", "BOTTOM RIGHT"}};
@@ -99,10 +103,37 @@ const Setting kEmuSettings[] = {
           "DSI MENU: HIDE THE NAND DUMP'S OWN TITLES. THE DUMP IS NOT CHANGED"),
   boolean("emu.dsi_nand_shortcuts", "DSI NAND LINKS", "false", FlagLive, Dep::ShortcutsPath,
           "GAME LIST ENTRIES THAT START THE NAND'S DSIWARE WITHOUT THE DSI MENU"),
+  // Always this game's own file: "don't ask again" wrote it there.
+  boolean("slot2.ask", "ASK FOR GBA GAME", "true", FlagRestart, Dep::Slot2Link,
+          "BEFORE THIS GAME STARTS, OFFER THE GBA GAMES IT READS. KEPT FOR THIS GAME"),
+  pick("slot2.rumble", "RUMBLE PAK", kRumble, 3, "auto", FlagRestart, Dep::None,
+       "IN SLOT 2 WHEN NO GBA GAME IS. AUTO: WHEN THE CONTROLLER CAN RUMBLE"),
+  number("slot2.rumble_strength", "RUMBLE STRENGTH", 10, 100, 10, "100", FlagLive, Dep::RumblePak,
+         "HOW HARD THE MOTOR RUNS WHEN THE GAME RUMBLES", nullptr, nullptr, "%"),
+  number("slot2.solar", "SOLAR SENSOR", 0, 10, 1, "5", FlagLive, Dep::SolarSensor,
+         "THE SUNLIGHT A BOKTAI CARTRIDGE SEES: 0 DARK, 10 FULL SUN"),
   pick("net.mode", "NETWORK FEATURES", kNetMode, 5, "off", FlagLive, Dep::Net,
        "LOCAL WIRELESS, OR INTERNET. AUTO JOINS A SESSION, ELSE HOSTS ONE"),
   pick("wifi.dns", "DNS", kWifiDns, 2, "wiimmfi", FlagRestart, Dep::NetInternet,
        "WHERE THE GAME LOOKS UP ITS SERVERS. NINTENDO'S ARE GONE; WIIMMFI REPLACES THEM"),
+  end(),
+};
+
+const Setting kAnalogSettings[] = {
+  pick("pad.analog", "ANALOG PATCH", kAnalog, 5, "auto", FlagLive, Dep::None,
+       "NEEDS A CPAD CHEAT ON. AUTO USES CONTROLS AS AVAILABLE"),
+  number("pad.analog_deadzone", "ANALOG DEADZONE", 0, 30000, 500, "6000", FlagLive, Dep::None,
+         "HOW FAR A STICK MUST MOVE BEFORE AN ANALOG PATCH SEES IT"),
+  number("pad.analog_sensitivity_left", "LEFT SENSITIVITY", 10, 300, 10, "100", FlagLive, Dep::None,
+         "UNDER 100 CAPS THE TOP SPEED; OVER 100 GETS THERE WITH LESS TRAVEL",
+         nullptr, nullptr, "%"),
+  number("pad.analog_sensitivity_right", "RIGHT SENSITIVITY", 10, 300, 10, "100", FlagLive, Dep::None,
+         "UNDER 100 CAPS THE TOP SPEED; OVER 100 GETS THERE WITH LESS TRAVEL",
+         nullptr, nullptr, "%"),
+  boolean("pad.analog_invert_y", "ANALOG INVERT Y", "false", FlagLive, Dep::None,
+          "FLIP THE STICKS' UP AND DOWN FOR AN ANALOG PATCH"),
+  pick("pad.analog_layout", "ANALOG LAYOUT", kAnalogLayout, 3, "auto", FlagLive, Dep::None,
+       "HOW THE PATCH WANTS STICK DATA ARRANGED. AUTO READS THE PATCH"),
   end(),
 };
 
@@ -119,10 +150,10 @@ const Setting kVideoSettings[] = {
        "DRAW BLOCKS OF DS PIXELS AS ONE FLAT CELL, FOR PANELS AT ODD SCALES"),
   number("video.chunky_cell", "CHUNKY CELL", 2, 8, 1, "auto", FlagDeferred, Dep::ChunkyCell,
          "PANEL PIXELS PER CELL", "auto", "AUTO"),
-  boolean("video.aa", "ANTI-ALIASING", "false", FlagLive, Dep::None,
-          "3D EDGES: THE HARDWARE'S BLEND ON THE CPU RASTER, 4X MSAA ON THE GPU RASTER"),
+  pick("video.aa", "ANTI-ALIASING", kAa, 3, "false", FlagLive, Dep::None,
+       "DS ACCURATE IN CPU RENDER, 4X MSAA ON GPU (VULKAN ONLY)"),
   boolean("video.gpu3d", "GPU 3D", "false", FlagLive, Dep::None,
-          "DRAW THE 3D LAYER ON THE GPU. NEEDS VULKAN; THE CPU DRAWS IT OTHERWISE"),
+          "DRAW THE 3D LAYER ON THE GPU WHEN POSSIBLE, OTHERWISE CPU IS USED"),
   boolean("video.fps", "FPS COUNTER", "false", FlagLive, Dep::None,
           "FRAMES PER SECOND IN THE CORNER OF THE SCREEN"),
   boolean("video.fullscreen", "FULLSCREEN", "false", FlagDeferred, Dep::Windowed, nullptr),

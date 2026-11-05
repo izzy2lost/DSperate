@@ -282,7 +282,11 @@ int clip_polygon(Vertex* v, int nverts, int clipstart, bool far_clip) {
 
 Gpu3D::~Gpu3D() { renderer_.sync_all(); }
 
-Gpu3D::Gpu3D(NDS& nds) : nds_(nds), renderer_(nds) { reset(); }
+Gpu3D::Gpu3D(NDS& nds) : nds_(nds), renderer_(nds) {
+  if (const char* e = std::getenv("DS_EDGE_DENSITY")) edge_density_ = std::atoi(e);   // the GPU edge cut's clump limit (edge_line)
+  if (const char* e = std::getenv("DS_EDGE_GAP")) edge_gap_ = std::atoi(e) != 0;      // the GPU edge cut's gap fill (edge_line)
+  reset();
+}
 
 void Gpu3D::reset_render_state() {
   render_count_.fill(0);
@@ -1448,6 +1452,10 @@ template <class S> void Gpu3D::sync_state(S& s) {
       else { Polygon copy = pram_[b * PRAM_BANK + i]; for (u32 j = 0; j < 10; ++j) copy.vtx[j] = static_cast<u16>(remap(copy.vtx[j], VRAM_BANK)); sync_polygon(s, copy); }
     }
   }
+  // GXSTAT's busy flag must follow the restored scheduler timeline, not
+  // the later session we are replacing. Older states omit these fields.
+  if constexpr (S::reading) { swap_wait_ = false; swap_busy_until_ = 0; }
+  s.fields(swap_wait_, swap_busy_until_);
   s.end();
   renderer_.sync_output(s);
   stack_err_ = gxstat_ & 0x8000u; box_result_ = gxstat_ & 2u; gxstat_ &= ~0x8002u;

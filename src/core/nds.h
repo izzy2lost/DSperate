@@ -15,6 +15,7 @@
 #include "core/cart/cart.h"
 #include "core/cart/zip.h"
 #include "core/cheat/ar_engine.h"
+#include "core/slot2/slot2.h"
 
 #include <atomic>
 #include <memory>
@@ -209,10 +210,39 @@ struct NDS {
   dma::Dma   dma;
   dma::Ndma  ndma;                 // DSi only; idle on a DS
   std::unique_ptr<cart::Cart> cart;
+  // Slot 2 (the GBA slot, slot2/slot2.h): a GBA game or the Rumble Pak,
+  // null when empty. The frontend inserts it before the first frame and it
+  // stays for the session; reset() keeps it. A DSi has no slot 2: the bus
+  // ignores a device here while `dsi` is set.
+  std::unique_ptr<slot2::Device> slot2;
+  slot2::GameCart* gba_cart() const {
+    return slot2 && slot2->kind() == slot2::Kind::Game ? static_cast<slot2::GameCart*>(slot2.get()) : nullptr;
+  }
 
-  // Action Replay codes, run from the ARM7's VBlank IRQ when enabled. Not
-  // part of a save state: which cheats are on is the frontend's business.
+  // Action Replay codes, run from the ARM7's VBlank IRQ when enabled. Which
+  // cheats are on is the frontend's business and not part of a save state;
+  // the write journal is, because the RAM it describes is.
   cheat::Engine cheats;
+
+  // An analog-controls patch (a stripped shocoman CPAD cheat) is active for
+  // this game: input::apply() then writes the frame's stick/ZL/ZR state to
+  // guest shared RAM at 0x027FFDF0 every frame, where the patch's ARM9 hook
+  // reads it. Set by the frontend; not part of a save state (the words are
+  // rewritten every frame, like buttons and touch).
+  bool analog_patch = false;
+  // Which relay layout the game's hook expects at 0x027FFDF0. Packed is
+  // the generic shocoman relay (SM64DS); Extended is Metroid's custom
+  // relay (ZL/ZR byte at +4, nub as s16 at +6/+8, gyro words at +10).
+  // Most games use Packed. The frontend reads it from the enabled code
+  // (cheat::reads_extended_analog) unless pad.analog_layout says otherwise.
+  enum class AnalogLayout : u8 { Packed, Extended };
+  AnalogLayout analog_layout = AnalogLayout::Packed;
+  // The enabled CPAD code is the "with Nub stick, ZL and ZR" variant: the
+  // second word (nub + ZL/ZR) is live. Without it that word stays zero,
+  // exactly as the plain 3DS patch leaves it -- the ARM9 hook is the same
+  // in both variants and would otherwise turn the camera on data the
+  // player never asked it to have.
+  bool analog_full = false;
 
   u64  frame_count = 0;
   bool frame_ready = false;
