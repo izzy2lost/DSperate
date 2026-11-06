@@ -1,9 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Rows are paired up so the whole menu, Exit included, fits a landscape screen without
      scrolling: the grid is three columns in landscape and two in portrait (set in showMenu). -->
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
-    android:layout_width="match_parent"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"    android:layout_width="match_parent"
     android:layout_height="wrap_content">
 
     <LinearLayout
@@ -49,8 +47,7 @@
                 android:layout_weight="1"
                 android:layout_marginStart="3dp"
                 android:layout_marginEnd="3dp"
-                android:text="@string/menu_achievements"
-                app:icon="@drawable/ic_trophy" />
+                android:text="@string/menu_achievements" />
         </LinearLayout>
 
         <GridLayout
