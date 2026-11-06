@@ -41,12 +41,19 @@ uvec4 tex_rgba(GpuPoly p, int s, int t) {
 // each fetched through the DS's own wrap/flip/clamp. Colour is weighted by
 // alpha (a transparent texel's colour is not its picture), then rounded back
 // to the DS's precision for the combine. An enhancement, not the hardware.
-uvec4 tex_rgba_filtered(GpuPoly p, vec2 st) {
+//
+// `lo`/`hi`: the polygon's texcoord bounds (12.4). The taps stay on the
+// texels the polygon covers: half a texel past its edge, a repeating
+// texture's wrap would fetch the far side of the texture (a sprite's top
+// row blending with its solid bottom row draws a line along the edge).
+// A polygon that does tile spans past one repeat, so its wraps are kept.
+uvec4 tex_rgba_filtered(GpuPoly p, vec2 st, vec2 lo, vec2 hi) {
   vec2 u = st / 16.0 - 0.5;
   vec2 b = floor(u), f = u - b;
-  int s0 = int(b.x) * 16, t0 = int(b.y) * 16;
-  vec4 c00 = vec4(tex_rgba(p, s0, t0)), c10 = vec4(tex_rgba(p, s0 + 16, t0));
-  vec4 c01 = vec4(tex_rgba(p, s0, t0 + 16)), c11 = vec4(tex_rgba(p, s0 + 16, t0 + 16));
+  vec2 first = floor(lo / 16.0), last = max(ceil(hi / 16.0) - 1.0, first);
+  ivec2 i0 = ivec2(clamp(b, first, last)) * 16, i1 = ivec2(clamp(b + 1.0, first, last)) * 16;
+  vec4 c00 = vec4(tex_rgba(p, i0.x, i0.y)), c10 = vec4(tex_rgba(p, i1.x, i0.y));
+  vec4 c01 = vec4(tex_rgba(p, i0.x, i1.y)), c11 = vec4(tex_rgba(p, i1.x, i1.y));
   vec4 w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
   vec4 wa = w * vec4(c00.a, c10.a, c01.a, c11.a);
   float asum = wa.x + wa.y + wa.z + wa.w;

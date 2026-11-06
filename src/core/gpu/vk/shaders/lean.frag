@@ -64,7 +64,7 @@ void main() {
   }
   uint blendmode = (p.attr >> 4) & 3u;
   uint polyalpha = (p.attr >> 16) & 0x1Fu;
-  uint src = filt ? shade_texel(p, blendmode, polyalpha, true, rgb9.r, rgb9.g, rgb9.b, tex_rgba_filtered(p, stf))
+  uint src = filt ? shade_texel(p, blendmode, polyalpha, true, rgb9.r, rgb9.g, rgb9.b, tex_rgba_filtered(p, stf, st_bounds_lo(p), st_bounds_hi(p)))
                   : shade_pixel(p, blendmode, polyalpha, textured, rgb9.r, rgb9.g, rgb9.b, st4.x, st4.y);
   uint alpha = src >> 24;
 #ifndef DS_EARLY
