@@ -45,7 +45,9 @@ NDS::NDS()
   reset();
 }
 
-NDS::~NDS() = default;
+// gpu3d is declared after gpu and so destroyed first: the 2D side's worker and
+// a late capture in flight read its renderer, and are stopped before that.
+NDS::~NDS() { gpu.stop_jobs(); }
 
 void NDS::reset() {
   cheats.forget_writes();   // the journal's originals belong to the pre-reset machine
@@ -125,7 +127,14 @@ bool NDS::load_bios(const std::string& p9, const std::string& p7, const std::str
   if (have9 != have7) return fail(std::string(have9 ? p7 : p9) + ": the other BIOS half is present; both or neither");
   if (have9) { b9 = slurp(p9); if (b9.size() != mem::Bus::BIOS9_SIZE) return fail(p9 + ": not a 4 KB ARM9 BIOS"); }
   if (have7) { b7 = slurp(p7); if (b7.size() != mem::Bus::BIOS7_SIZE) return fail(p7 + ": not a 16 KB ARM7 BIOS"); }
-  if (exists(pfw)) { fw = slurp(pfw); if (fw.empty()) return fail(pfw + ": empty firmware"); }
+  if (exists(pfw)) {
+    fw = slurp(pfw);
+    // Only the real image sizes: 128 KB (DSi), 256 KB (DS) or 512 KB (DS Lite,
+    // iQue). Anything else is a mis-saved download; booting on it gives the
+    // game a user-settings block it rejects (touch calibration collapses to 0,0).
+    if (fw.size() != 0x20000 && fw.size() != 0x40000 && fw.size() != 0x80000)
+      return fail(pfw + ": " + std::to_string(fw.size()) + " bytes is not a firmware dump (128, 256 or 512 KB)");
+  }
   std::memset(bus.bios9.get(), 0, mem::Bus::BIOS9_SIZE);
   std::memset(bus.bios7.get(), 0, mem::Bus::BIOS7_SIZE);
   if (b9.empty()) std::memcpy(bus.bios9.get(), bios::kFreeBios9, bios::kFreeBios9_len);
@@ -403,21 +412,30 @@ void NDS::setup_direct_boot() {
     for (u32 i = 0; i < 0x800; i += 4) w32(h.arm9_ram_address + i, rd32(secure + i));
     arm9_start = 0x800;
   }
-  for (u32 i = arm9_start; i < h.arm9_size; i += 4) w32(h.arm9_ram_address + i, rom32(h.arm9_rom_offset + i));
-  for (u32 i = 0; i < h.arm7_size; i += 4) bus.dma_write32(Cpu::ARM7, h.arm7_ram_address + i, rom32(h.arm7_rom_offset + i));
+  for (u32 i = arm9_start; i < cart->boot_size(h.arm9_size); i += 4) w32(h.arm9_ram_address + i, rom32(h.arm9_rom_offset + i));
+  for (u32 i = 0; i < cart->boot_size(h.arm7_size); i += 4) bus.dma_write32(Cpu::ARM7, h.arm7_ram_address + i, rom32(h.arm7_rom_offset + i));
 
-  // Firmware user settings, as the firmware copies them.
-  if (firmware.size() >= 0x40000) {
+  // Firmware user settings, as the firmware copies them. The 0x20 pointer
+  // holds in the 128 KB DSi image too (normalise_touch_calibration's bound).
+  if (firmware.size() >= 0x20000) {
     const u16 user_off = static_cast<u16>(firmware[0x20] | (firmware[0x21] << 8));
     w32(0x027FF864, 0);
     w32(0x027FF868, static_cast<u32>(user_off) << 3);
     w16(0x027FF874, static_cast<u16>(firmware[0x06] | (firmware[0x07] << 8)));
     w16(0x027FF876, static_cast<u16>(firmware[0x04] | (firmware[0x05] << 8)));
-    // Two copies of the user settings; the one with the higher update counter wins.
+    // Two copies of the user settings: the one whose CRC holds, and of two
+    // good ones the newer by the 7-bit update counter, which wraps (0 follows
+    // 0x7F). As the firmware and melonDS choose.
     const u32 u0 = static_cast<u32>(user_off) << 3, u1 = u0 + 0x100;
-    auto counter = [&](u32 off) { return (off + 0x72 <= firmware.size()) ? (firmware[off + 0x70] | (firmware[off + 0x71] << 8)) & 0x7F : -1; };
-    const int c0 = counter(u0), c1 = counter(u1);
-    const u32 sel = (c1 > c0 && ((c1 - c0) & 0x7F) == 1) ? u1 : u0;
+    auto good = [&](u32 off) {
+      return off + 0x74 <= firmware.size() &&
+             bios::crc16(&firmware[off], 0x70, 0xFFFF) == static_cast<u16>(firmware[off + 0x72] | (firmware[off + 0x73] << 8));
+    };
+    auto counter = [&](u32 off) { return static_cast<u32>(firmware[off + 0x70] | (firmware[off + 0x71] << 8)) & 0x7F; };
+    const bool g0 = good(u0), g1 = good(u1);
+    u32 sel = u0;
+    if (g1 && (!g0 || ((counter(u1) - counter(u0)) & 0x7F) == 1)) sel = u1;
+    if (sel + 0x70 > firmware.size()) sel = 0;   // a pointer past the image: nothing sensible to copy, but stay inside it
     for (u32 i = 0; i < 0x70; i += 4) w32(0x027FFC80 + i, rd32(firmware.data() + sel + i));
   }
 
@@ -441,7 +459,7 @@ void NDS::setup_direct_boot() {
   arm7->jump(h.arm7_entry, true);
   arm9->hot.cycle_budget = 0; arm7->hot.cycle_budget = 0;
 
-  io.exmemcnt = 0xE880; bus.update_gba_slot_timings();
+  io.exmemcnt = 0xE880; io.exmemcnt7 = 0; bus.update_gba_slot_timings();
   io.wifiwaitcnt = 0x0030; bus.update_wifi_timings();   // Wi-Fi is unpowered until POWCNT2 says otherwise
   io.cpu_io[0].postflg = 1; io.cpu_io[1].postflg = 1;
   io.powcnt1 = 0x820F; gpu.set_powcnt(0x820F);
@@ -453,22 +471,31 @@ void NDS::setup_direct_boot() {
 }
 
 void NDS::run_frame() {
-  if (frame_in_slices) { sched.run_until_frame(); frame_in_slices = false; ++frame_count; return; }   // finish a sliced frame
+  if (io.sleeping) { io.run_sleep(CYCLES_PER_FRAME); ++frame_count; return; }
+  if (frame_in_slices) { sched.run_until_frame(); if (io.sleeping) gpu.quiesce(); frame_in_slices = false; ++frame_count; return; }   // finish a sliced frame
   if (!gpu.frame_begun()) gpu.begin_frame();   // first frame after reset/direct boot starts at line 0 without a line-0 event
   frame_ready = false;
   sched.run_until_frame();   // one entry into the slice loop per frame, not per event
+  if (io.sleeping) gpu.quiesce();   // STOP can return before the line-0 worker join
   ++frame_count;
   if (bus.arena_) bus.fastmem_flush();
 }
 
 bool NDS::run_frame_slice(u64 cycles) {
+  if (io.sleeping) {
+    if (!io.run_sleep(cycles)) return false;
+    frame_in_slices = false;
+    ++frame_count;
+    return true;
+  }
   if (!frame_in_slices) {
     if (!gpu.frame_begun()) gpu.begin_frame();
     frame_ready = false;
     frame_in_slices = true;
   }
   sched.run_until_or_frame(sched.now() + cycles);
-  if (!frame_ready) return false;
+  if (!frame_ready && !io.sleeping) return false;
+  if (io.sleeping) gpu.quiesce();
   frame_in_slices = false;
   ++frame_count;
   if (bus.arena_) bus.fastmem_flush();
@@ -485,11 +512,11 @@ template <class S, class T> void sync_vec(S& s, std::vector<T>& v) { s.vec(v); }
 template <class S> void sync_strings(S& s, std::vector<std::string>& v) {
   u32 n = static_cast<u32>(v.size());
   s.put(n);
-  if constexpr (S::reading) { if (!s.more() && n) { s.fail("short read"); return; } v.resize(n); }
+  if constexpr (S::reading) { if (n > s.remaining() / 4) { s.fail("short read"); v.clear(); return; } v.resize(n); }   // each string is at least its length word
   for (std::string& str : v) {
     u32 len = static_cast<u32>(str.size());
     s.put(len);
-    if constexpr (S::reading) str.resize(len);
+    if constexpr (S::reading) { if (len > s.remaining()) { s.fail("short read"); return; } str.resize(len); }
     if (len) s.blob(str.data(), len);
   }
 }
@@ -516,6 +543,12 @@ template <class S> void sync_sd(S& s, io::SdCard::StateSnapshot& c) {
     sync_strings(s, c.files);
     sync_strings(s, c.known_key); sync_strings(s, c.known_host);
     sync_vec(s, c.known_dir); sync_vec(s, c.known_size); sync_vec(s, c.known_mtime); sync_vec(s, c.known_mtime_ns);
+    if constexpr (S::reading) {   // the records are walked in step: one length for each group
+      const size_t n = c.known_key.size(), e = c.ext_start.size();
+      if (c.known_host.size() != n || c.known_dir.size() != n || c.known_size.size() != n || c.known_mtime.size() != n || c.known_mtime_ns.size() != n ||
+          c.ext_len.size() != e || c.ext_file_off.size() != e || c.ext_file.size() != e || c.data.size() != c.sectors.size() * 512)
+        s.fail("SD card record");
+    }
   }
   s.end();
 }
@@ -524,7 +557,7 @@ template <class S> void sync_sd(S& s, io::SdCard::StateSnapshot& c) {
 bool NDS::save_state(state::Writer& w, std::string& err) {
   if (!cart && !dsi) { err = "no cartridge"; return false; }
   if (dsi && dsi_nand.write_through()) { err = "the NAND is written through to its file, which a state cannot carry"; return false; }
-  if (!sched.at_slice_boundary() || gpu.line() != 0 || !gpu.at_line_start()) { err = "not at a frame boundary"; return false; }
+  if (!sched.at_slice_boundary() || (!io.sleeping && (gpu.line() != 0 || !gpu.at_line_start()))) { err = "not at a frame boundary"; return false; }
   // Quiesce: nothing here changes what the guest observes.
   gpu.quiesce();
   gpu3d.sync_raster();
@@ -547,6 +580,8 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
   // A thumbnail of the top screen, RGB565.
   w.put(THUMB_W); w.put(THUMB_H);
   const u32* fb = gpu.framebuffer(0);
+  std::vector<u32> merged;   // a frame split for the present's 3D merge: the top screen with its 3D layer
+  if (gpu::Gpu::Split3DScreen sf; gpu.split3d_screen(0, &sf) && sf.live) { merged.resize(SCREEN_W * SCREEN_H); gpu.merge_split3d(0, merged.data()); fb = merged.data(); }
   for (u32 y = 0; y < THUMB_H; ++y)
     for (u32 x = 0; x < THUMB_W; ++x) {
       const u32 p = fb[(y * 2) * SCREEN_W + x * 2];
@@ -585,11 +620,34 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
     slot2->sync_state(w);
     w.end();
   }
+  // The DSi DSP's core, in a chunk of its own after the machine's.
+  if (dsi) { w.begin("DSPC"); io.dsp.sync_core(w); w.end(); }
   cheats.save_journal(w);   // there only when an analog code has written
   return true;
 }
 
+// A load that fails once the machine is being overwritten puts back the
+// machine as it was: taken as a state of its own just before, loaded again
+// on the failure. The run goes on from where it stood, save memory included.
 bool NDS::load_state(state::Reader& r, std::string& err) {
+  bool began = false;
+  state::Writer undo;
+  // Whether each save file is behind its memory is the session's, not the state's.
+  const bool dirty = cart && cart->sram_dirty(), from = cart && cart->sram_from_state();
+  slot2::GameCart* const g = gba_cart();
+  const bool g_dirty = g && g->save_dirty(), g_from = g && g->save_from_state();
+  if (load_state_into(r, err, &undo, began)) return true;
+  if (!began) return false;
+  if (undo.data().empty()) { err += " (the machine is left half loaded: reset it)"; return false; }
+  state::Reader back(undo.data().data(), undo.data().size());
+  std::string why; bool again = false;
+  if (!load_state_into(back, why, nullptr, again)) { err += " (and the machine could not be put back: " + why + "; reset it)"; return false; }
+  if (cart) cart->set_sram_flags(dirty, from);
+  if (g && g == gba_cart()) g->set_save_flags(g_dirty, g_from);
+  return false;
+}
+
+bool NDS::load_state_into(state::Reader& r, std::string& err, state::Writer* undo, bool& began) {
   char magic[4]; r.blob_raw(magic, 4);
   u32 version = 0; r.blob_raw(&version, 4);
   if (std::memcmp(magic, "DSST", 4) != 0) { err = "not a DSperate save state"; return false; }
@@ -651,7 +709,12 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
     }
   }
 
-  // From here the machine is being overwritten: a failure leaves it broken.
+  // From here the machine is being overwritten: a failure is undone by the caller.
+  if (undo) {
+    std::string e;
+    if (!save_state(*undo, e)) undo->data().clear();
+  }
+  began = true;
   if (dsi) io.sd.attach_sd(with_card ? &dsi_sd : nullptr);
   gpu.prepare_load();
   gpu3d.sync_raster();
@@ -682,7 +745,8 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
     else {
       const char* was = kind == static_cast<u8>(slot2::Kind::Game) ? (slot2 && slot2->kind() == slot2::Kind::Game ? "another GBA game" : "a GBA game")
                       : kind == static_cast<u8>(slot2::Kind::RumblePak) ? "the Rumble Pak"
-                      : kind == static_cast<u8>(slot2::Kind::GuitarGrip) ? "the Guitar Grip" : "a device";
+                      : kind == static_cast<u8>(slot2::Kind::GuitarGrip) ? "the Guitar Grip"
+                      : kind == static_cast<u8>(slot2::Kind::MotionPak) ? (slot2 && slot2->kind() == slot2::Kind::MotionPak ? "the other motion accessory" : "a motion accessory") : "a device";
       std::fprintf(stderr, "state: made with %s in slot 2, and %s; slot 2 starts afresh\n", was, slot2 ? "something else is in it now" : "it is empty now");
       if (slot2) slot2->reset();
     }
@@ -691,6 +755,8 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
     slot2->reset();
   }
   cheats.forget_writes();   // memory now matches the state, not the old journal
+  if (r.peek("DSPC")) { r.begin("DSPC"); io.dsp.sync_core(r); r.end(); }
+  else if (dsi) io.dsp.core_absent_in_state();
   if (r.peek("CHJR")) cheats.load_journal(r);   // frontends' own chunks may follow
   if (!r.ok()) { err = r.error(); return false; }
   if (dsi) {

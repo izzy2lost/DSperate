@@ -11,18 +11,26 @@
 
 namespace ds {
 
-// Fast unless DS_TIMING=exact; exact by default where the recompiler is the
-// ARMv7 one, which implements only the exact model.
+// Fast unless DS_TIMING says otherwise (exact | fast | turbo).
 // DS_FAST="d9s,d9,d7,r9,r7" overrides the fast model's constants (tuning only).
-FastTiming g_fast = [] {
-  FastTiming f;
+namespace {
+bool g_turbo = false;
+FastTiming fast_constants(bool turbo) {
+  FastTiming f = turbo ? kTurboTiming : FastTiming{};
   if (const char* e = std::getenv("DS_FAST")) std::sscanf(e, "%u,%u,%u,%u,%u", &f.d9s, &f.d9, &f.d7, &f.r9, &f.r7);
   return f;
-}();
-bool g_fast_timing = [] {
-  if (const char* e = std::getenv("DS_TIMING")) return std::strcmp(e, "exact") != 0 && kFastTimingAvailable;
-  return kFastTimingAvailable;
-}();
+}
+}
+FastTiming g_fast = fast_constants(false);
+bool g_fast_timing = true;
+bool set_timing(const char* name) {
+  const bool exact = !std::strcmp(name, "exact"), turbo = !std::strcmp(name, "turbo");
+  if (!exact && !turbo && std::strcmp(name, "fast") != 0) return false;
+  g_fast_timing = !exact; g_turbo = turbo; g_fast = fast_constants(turbo);
+  return true;
+}
+const char* timing_name() { return !g_fast_timing ? "exact" : g_turbo ? "turbo" : "fast"; }
+namespace { [[maybe_unused]] const bool g_timing_env = [] { const char* e = std::getenv("DS_TIMING"); return e && set_timing(e); }(); }
 
 namespace {
 // Bank index for each mode: {USR/SYS, FIQ, IRQ, SVC, ABT, UND}.
@@ -189,6 +197,7 @@ template <class S> void CpuContext::sync_state(S& s) {
            cp15_control, cp15_dtcm, cp15_itcm, pu_region, pu_code_cacheable, pu_data_cacheable, pu_data_bufferable, pu_code_perm, pu_data_perm,
            code_cycles, data_cycles, code_region, data_region, branch_fetch, budget_at_halt);
   s.fields(boot_stall, code_latch, irq_offline, irq_skip_once, defer_cost);   // DSi; zero on a DS
+  if constexpr (S::reading) { if (which == Cpu::ARM7) code_cycles &= 0x1FFFF; }   // an ARM7 index into timing7 (pc >> 15)
   s.end();
 }
 template void CpuContext::sync_state<state::Writer>(state::Writer&);

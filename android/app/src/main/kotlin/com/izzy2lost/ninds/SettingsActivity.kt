@@ -222,7 +222,7 @@ class SettingsActivity : AppCompatActivity() {
             if (!Settings.hasVulkan(requireContext())) {
                 // OpenGL ES 3.1 still draws GPU 3D, at native resolution only.
                 val gles = Settings.hasGles31(requireContext())
-                for (key in listOf(Settings.GPU_SCALE, Settings.TEX_FILTER)) findPreference<Preference>(key)?.isEnabled = false
+                findPreference<Preference>(Settings.GPU_SCALE)?.isEnabled = false
                 findPreference<Preference>(Settings.GPU3D)?.isEnabled = gles
                 findPreference<Preference>("gpu_scale_note")?.summary = getString(if (gles) R.string.pref_gpu_gles_only else R.string.pref_gpu_needs_vulkan)
             }

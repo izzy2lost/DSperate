@@ -3,18 +3,22 @@
 #include "display_drm.h"
 #include "dmaheap.h"
 #include "drm_uapi.h"
+#include "frontend/video/select.h"
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_syswm.h>
 
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 #include <algorithm>
 
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
+#include <sched.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -87,7 +91,8 @@ void DrmOut::drop_buf(Buf& b) {
   b = Buf{};
 }
 
-bool DrmOut::open(SDL_Window* win, int w, int h, int display_index) {
+bool DrmOut::open(SDL_Window* win, int w, int h, int display_index, bool* turned) {
+  if (turned) *turned = false;
   fd_ = sdl_drm_fd(win);
   if (fd_ < 0) return false;
   display_ = display_index;
@@ -121,8 +126,15 @@ bool DrmOut::open(SDL_Window* win, int w, int h, int display_index) {
     conn_ = c;
     // A page flip's framebuffer must cover the CRTC, so only a mode matching
     // the window's exact size works -- no windowed (sub-panel) use here.
-    for (const drmu::mode_modeinfo& m : modes)
-      if (m.hdisplay == w && m.vdisplay == h) { mode = m; found = true; break; }
+    // Or the panel's own shape under an SDL that reports it turned (frontend::pick_kms_mode).
+    {
+      std::vector<frontend::ModeSize> sizes;
+      for (const drmu::mode_modeinfo& m : modes) sizes.push_back({m.hdisplay, m.vdisplay});
+      bool t = false;
+      const int pick = frontend::pick_kms_mode(sizes, w, h, turned ? &t : nullptr);
+      if (pick >= 0) { mode = modes[static_cast<size_t>(pick)]; found = true; }
+      if (t) { *turned = true; std::swap(w_, h_); }
+    }
     if (!found) {
       std::fprintf(stderr, "drm: display %d has no %dx%d mode (panel is %ux%u); scanout needs a fullscreen window\n",
                    display_index, w, h, modes[0].hdisplay, modes[0].vdisplay);
@@ -190,6 +202,15 @@ bool DrmOut::flip(int i) {
   pf.user_data = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(this));
   if (ioctl(fd_, drmu::IOCTL_MODE_PAGE_FLIP, &pf) < 0) { std::perror("drm: PAGE_FLIP"); bufs_[i].busy = false; return false; }
   pending_ = i;
+  // The flip is applied by a kernel worker queued on this core. Under a real-time thread that keeps the core
+  // for the whole frame (a title over budget) it does not run before the next vblank, and every flip then
+  // takes two refreshes: 30 fps for a frame of 17-33 ms. One yield as a normal task lets it write the flip now.
+  static const bool no_yield = std::getenv("DS_DRM_FLIP_YIELD") && std::atoi(std::getenv("DS_DRM_FLIP_YIELD")) == 0;
+  int pol = 0; sched_param sp{};
+  if (!no_yield && pthread_getschedparam(pthread_self(), &pol, &sp) == 0 && (pol == SCHED_RR || pol == SCHED_FIFO)) {
+    sched_param z{};
+    if (pthread_setschedparam(pthread_self(), SCHED_OTHER, &z) == 0) { sched_yield(); pthread_setschedparam(pthread_self(), pol, &sp); }
+  }
   return true;
 }
 

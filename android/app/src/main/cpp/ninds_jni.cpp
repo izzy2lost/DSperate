@@ -226,7 +226,7 @@ JNI_FN(jintArray, nativeGetFrame)(JNIEnv* env, jobject) {
   auto* s = session();
   if (!s) return nullptr;
   std::vector<uint32_t> px;
-  s->presenter().snapshot(px);
+  s->snapshot(px);
   for (uint32_t& p : px) p |= 0xFF000000u;
   jintArray out = env->NewIntArray(static_cast<jsize>(px.size()));
   if (out) env->SetIntArrayRegion(out, 0, static_cast<jsize>(px.size()), reinterpret_cast<const jint*>(px.data()));

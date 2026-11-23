@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
+#include "core/slot2/slot2.h"
 #include "core/io/io.h"
 #include "core/input/input_log.h"
 
@@ -20,6 +21,8 @@ enum class Action : u8 {
   VolumeUp, VolumeDown, Mute, LayoutNext, LayoutPrev, ScreenSwap, PipCornerNext, Fullscreen, Screenshot, Lid, Mic, FpsToggle, Count
 };
 const char* action_name(Action a);
+// The Controls page's English name for it ("FAST FORWARD"), marked for translation.
+const char* action_label(Action a);
 
 // Keyboard, game controller and touch folded into the DS's button mask and
 // pen position, handed to the core once a frame. Bindings come from the
@@ -33,6 +36,11 @@ public:
   // and stick_face let go of them, and the pen takes its stick back while the
   // pad.stylus_hold button is held (the pad modifier, while that is unbound).
   void set_analog_patch(bool on);
+  // The stick that tilts a slot-2 motion accessory while one is in the slot
+  // ("left", "right"; anything else: none). It is the accessory's then, as a
+  // patch's sticks are the patch's: the pen, stick_dpad and stick_face let go
+  // of it, and the pen takes it back while stylus_hold is held.
+  void set_motion_stick(const std::string& which);
 
   // DS_DUAL_SCREENS: "upper=<display>[:<touch>...],lower=...,none=<touch>..."
   // gives each physical panel its SDL display and touch devices (a touch is a
@@ -120,6 +128,11 @@ public:
   // forwards its rumble to the pwm-vibrator. rumble() runs both motors at
   // `strength` percent for `ms`, replacing whatever pulse was running.
   bool has_rumble() const;
+  // The controller's own accelerometer (and gyroscope, where it has one), as a
+  // slot-2 motion accessory feels it. False when the pad has none: `m` is left.
+  // Turns the sensors on at the first call.
+  bool pad_has_motion() const;
+  bool pad_motion(slot2::Motion& m);
   void rumble(int strength, u32 ms);
   // While the Guitar Grip is in slot 2, its four fret bindings (keys/pad
   // grip_green, grip_red, grip_yellow, grip_blue) work the frets instead of
@@ -174,6 +187,11 @@ public:
   // Last axis a capture took, as the physical control pushed ("-righty"),
   // before the remap. Empty if the capture was not an axis.
   const std::string& captured_raw_axis() const { return captured_raw_axis_; }
+  // A stick as it stands, -1..1, right and up positive (after the axis remap,
+  // before any dead zone): what tilts a slot-2 motion accessory.
+  void stick_position(bool right, float& x, float& y) const {
+    x = (right ? raw_rx_ : raw_lx_) / 32767.f; y = -(right ? raw_ry_ : raw_ly_) / 32767.f;
+  }
   static int action_count();
   static const char* key_hot_default(int i);
   static const char* pad_hot_default(int i);
@@ -285,6 +303,7 @@ private:
   void fill_analog(input::Frame& f) const;
 
   enum class StylusAxis : u8 { None, Right, Left };
+  StylusAxis motion_stick_ = StylusAxis::None;   // set_motion_stick
   // The patch has this stick (set_analog_patch); the modifier does not change it.
   bool analog_claims(StylusAxis s) const;
   // Config spelling: none | left | right. Old stick_dpad = true/false still

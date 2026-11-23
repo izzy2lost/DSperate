@@ -39,10 +39,9 @@ struct SessionConfig {
   bool jit = true;
   bool fast_timing = true;
   bool gpu3d = false;
-  int gpu_scale = 1;            // 3D internal resolution (1-8); above 1 implies the GPU raster
-  bool tex_filter = false;      // bilinear texture filtering; implies the GPU raster
-  // 0 off, 1 on (4x MSAA on the GPU raster, the hardware's blend on the CPU),
-  // 2 enhanced: the edge cut on the GPU raster at 1x (core/gpu/edge_cut.h), MSAA above.
+  int gpu_scale = 1;            // 3D internal resolution (1, 2 or 4); above 1 implies the GPU raster
+  bool tex_filter = false;      // smooth textures: not in the core's current GPU raster (ignored)
+  // 0 off, 1 on (4x MSAA on the GPU raster, the hardware's blend on the CPU).
   int aa = 0;
   // Slot 2 when no GBA game is inserted (set_slot2_gba): the Guitar Grip
   // for the Guitar Hero games, else the Rumble Pak when `rumble`.
@@ -76,6 +75,8 @@ public:
   void stop();   // flushes the battery save and the firmware settings
 
   Presenter& presenter() { return presenter_; }
+  // Both screens as shown (the 3D merged in at 1x where the presenter merges it), top above bottom, for thumbnails.
+  void snapshot(std::vector<uint32_t>& out);
 
   void set_paused(bool paused);
   void set_buttons(uint32_t mask) { buttons_.store(mask, std::memory_order_relaxed); }
@@ -210,7 +211,8 @@ private:
   // Guest that heard nobody at boot: one more scan when the game first goes on the air.
   bool guest_retry_armed_ = false, radio_was_on_ = false, scanning_ = false;
   std::chrono::steady_clock::time_point scan_began_{};
-  HiresFrame hires_;            // this frame's high-res 3D data, on its way to the presenter
+  HiresFrame hires_;            // this frame's 3D merge data, on its way to the presenter
+  bool merge3d_ = false;        // the core splits engine A's 3D out for the presenter (above 1x)
   uint32_t mic_seed_ = 0x1234567u;
 };
 

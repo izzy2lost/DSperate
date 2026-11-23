@@ -3,8 +3,10 @@
 //
 // Headless frontend: boots the BIOS/firmware (and optionally a ROM), runs N
 // frames, optionally tracing instructions or dumping frames/audio.
-#include "core/gpu/edge_cut.h"
+#include "core/gpu/colour.h"
 #include "core/nds.h"
+#include "core/safe_file.h"
+#include "frontend/camera_image.h"
 #include "core/cpu/timing_mode.h"
 #include "core/pc_sampler.h"
 #include "core/mem/fastmem_census.h"
@@ -37,11 +39,14 @@
 #include <vector>
 #include <algorithm>
 #include <chrono>
+#include <sys/stat.h>   // output_path_safe; not only with the network code below
 #include <thread>
 #if DSPERATE_NET
 #include "net/lan_mp.h"
 #include "net/slirp_driver.h"
 #include <arpa/inet.h>
+#include <strings.h>
+#include <sys/stat.h>
 #endif
 
 namespace {
@@ -175,6 +180,31 @@ void swi_log_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
   }
 }
 
+// False (with the reason on stderr) when writing `path` would destroy something: it is one of the run's input
+// files, or it exists and is named as a ROM, an archive or a battery save.
+bool output_path_safe(const char* opt, const char* path, const char* const* inputs, size_t n_inputs) {
+  struct stat out;
+  if (stat(path, &out) != 0) return true;   // a new file
+  if (!S_ISREG(out.st_mode)) return true;   // /dev/null, a pipe
+  for (size_t k = 0; k < n_inputs; ++k) {
+    struct stat in;
+    if (inputs[k] && stat(inputs[k], &in) == 0 && in.st_dev == out.st_dev && in.st_ino == out.st_ino) {
+      std::fprintf(stderr, "%s %s: that file is an input of this run; not overwriting it\n", opt, path);
+      return false;
+    }
+  }
+  static const char* const kept[] = {".nds", ".dsi", ".srl", ".ids", ".gba", ".zip", ".7z", ".sav", ".dsv", ".cia", ".dsin"};
+  const size_t len = std::strlen(path);
+  for (const char* e : kept) {
+    const size_t el = std::strlen(e);
+    if (len >= el && !strcasecmp(path + len - el, e)) {
+      std::fprintf(stderr, "%s %s: an existing %s file; not overwriting it\n", opt, path, e);
+      return false;
+    }
+  }
+  return true;
+}
+
 void write_blob(const std::string& path, const ds::u8* p, size_t n) {
   if (FILE* f = std::fopen(path.c_str(), "wb")) { std::fwrite(p, 1, n, f); std::fclose(f); }
 }
@@ -242,18 +272,20 @@ int main(int argc, char** argv) {
   int scaled_n = 0; const char* scaled_path = nullptr;
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *hash_frames = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
   const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
-  const char *gba_rom = nullptr, *gba_save = nullptr, *gba_save_out = nullptr; int gba_light = 5; bool rumble_pak = false, guitar_grip = false;
+  const char *gba_rom = nullptr, *gba_save = nullptr, *gba_save_out = nullptr, *save_out = nullptr; int gba_light = 5; bool rumble_pak = false, guitar_grip = false; const char* motion_pak = nullptr; ds::slot2::Motion motion; const char* camera_image = nullptr; bool timing_given = false;
   const char* hide_screen = nullptr;
   int frameskip = 0;    // --frameskip N: skip drawing N of every N+1 frames (fixed; the SDL frontend also has the adaptive mode)
   bool frameskip_capture = false;
   int stats_from = 0;   // --stats-from N: first frame counted in the timing statistics
   const char* pc_profile = nullptr;
   int dump_from = 0, dump_count = 0;   // --dump-from/--dump-count: window of a large dump
-  int cut_n = 0; const char* cut_path = nullptr;   // --dump-cut
+  std::vector<int> dump_at;   // --dump-at F1,F2,..: only these frames (replaces the window)
   long gpu_dump_frame = -1; const char* gpu_dump_path = nullptr;   // --dump-gpu-frame
   const char* rec3d_path = nullptr;   // --dump-3d
+  const char* fine3d_path = nullptr;  // --dump-3d-fine
+  const char* screens_scaled_path = nullptr;  // --dump-screens-scaled
   bool gpu3d = false;   // --gpu3d
-  bool aa_enhanced = false;   // --aa-enhanced: video.aa = enhanced (the GPU raster's cut-out pass)
+  int gpu3d_scale = 1;
   int frames = 60; bool direct = false;
 #if DSPERATE_JIT
   bool jit = true;                    // both CPUs; --interp clears it
@@ -264,6 +296,7 @@ int main(int argc, char** argv) {
   bool rtc_host = false;              // --rtc-host: free-running clock seeded from the wall
   const char* fw_override = nullptr;  // --firmware-override: sidecar of changed firmware pages
   bool no_aa = false;
+  const char* colour = nullptr;   // --colour
   bool frames_given = false;
   const char* cheat_db = nullptr;      // a usrcheat.dat to load this ROM's codes from
   const char* analog_db = nullptr;     // the analog controls database; null: the built-in one
@@ -287,7 +320,17 @@ int main(int argc, char** argv) {
   std::vector<Touch> touches;          // --touch F:x,y[:N]: press (x,y) from frame F for N frames (default 10)
   bool pace = false;                   // --pace: sleep to 60 frames a second
   for (int i = 1; i < argc; ++i) {
-    auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
+    // An option that takes values must be followed by them: a missing one is an error, never the next
+    // argument (which was the ROM, and an output option then wrote over it).
+    auto arg = [&](const char* name, int n = 1) {
+      if (std::strcmp(argv[i], name)) return false;
+      for (int k = 1; k <= n; ++k)
+        if (i + k >= argc || !argv[i + k][0] || !std::strncmp(argv[i + k], "--", 2)) {
+          std::fprintf(stderr, "%s needs %s\n", name, n > 1 ? "its values" : "a value");
+          std::exit(2);
+        }
+      return true;
+    };
     auto flag = [&](const char* name) { return !std::strcmp(argv[i], name); };
     if (arg("--frames")) { frames = std::atoi(argv[++i]); frames_given = true; }
     else if (arg("--lan-host")) { lan_host = argv[++i]; pace = true; }
@@ -329,17 +372,31 @@ int main(int argc, char** argv) {
     else if (arg("--trace")) trace = argv[++i];
     else if (arg("--max")) ts.max = std::strtoull(argv[++i], nullptr, 0);
     else if (arg("--dump-frames")) dump = argv[++i];
-    else if (arg("--dump-cut")) { cut_n = std::atoi(argv[++i]); cut_path = argv[++i]; }   // N FILE: both screens through the edge cut (core/gpu/edge_cut.h) at Nx, raw 0xAARRGGBB
     else if (arg("--dump-3d")) rec3d_path = argv[++i];   // FILE: the 3D layer record as the compositor reads it (256x192 words: RGB666 + 5-bit alpha in 24-28), for the --dump-from/--dump-count frames
-    else if (arg("--dump-gpu-frame")) { gpu_dump_frame = std::atol(argv[++i]); gpu_dump_path = argv[++i]; }   // N FILE: frame N's polygon list in the GPU raster's layout (vk_dump.h)
+    else if (arg("--dump-screens-scaled")) {   // FILE: with --gpu3d --gpu3d-scale N, both screens at N x as the GPU present composes them
+      // (the 2D side repeated, the 3D layer at full scale through the split merge); records as dsperate-research's
+      // DeSmuME harness --dump-screens: 256N x 192N words a screen, top then bottom, r | g << 8 | b << 16 | 31 << 24, RGB666
+      screens_scaled_path = argv[++i];
+      setenv("DS_LEAN_FINE", "1", 1); setenv("DS_SPLIT3D", "present", 1);
+      if (!std::getenv("DS_GPU_NOLAG")) setenv("DS_GPU_NOLAG", "1", 1);   // each frame's own record, not the lag rule's
+    }
+    else if (arg("--dump-3d-fine")) { fine3d_path = argv[++i]; setenv("DS_LEAN_FINE", "1", 1); }   // FILE: with --gpu3d --gpu3d-scale N, the GPU raster's record at its own scale (256N x 192N words a frame; a frame without one is written as zeros)
+    else if (arg("--dump-gpu-frame", 2)) { gpu_dump_frame = std::atol(argv[++i]); gpu_dump_path = argv[++i]; }   // N FILE: frame N's polygon list in the GPU raster's layout (vk_dump.h)
 
     else if (arg("--hash-frames")) hash_frames = argv[++i];   // FILE: "frame top bottom" per frame, FNV-1a 64 of each screen's 0xAARRGGBB (the video golden hashes)
-    else if (arg("--dump-scaled")) { scaled_n = std::atoi(argv[++i]); scaled_path = argv[++i]; }   // N FILE: both screens through the scanline scaler at Nx, raw BGRA
+    else if (arg("--dump-scaled", 2)) { scaled_n = std::atoi(argv[++i]); scaled_path = argv[++i]; }   // N FILE: both screens through the scanline scaler at Nx, raw BGRA
     else if (arg("--dump-from")) dump_from = std::atoi(argv[++i]);    // first frame to dump
     else if (arg("--dump-count")) dump_count = std::atoi(argv[++i]);  // how many (0 = to the end)
+    else if (arg("--dump-at")) { for (const char* p = argv[++i]; *p;) { char* e; dump_at.push_back(static_cast<int>(std::strtol(p, &e, 10))); p = *e ? e + 1 : e; } }   // F1,F2,..: every dump takes these frames only
     else if (arg("--dump-audio")) dump_audio = argv[++i];   // raw s16 stereo, 32768 Hz
     else if (arg("--replay")) replay = argv[++i];           // inputs recorded by dsperate-sdl --record; sets --frames to its length unless given
     else if (arg("--save")) save = argv[++i];               // battery save to start from; loaded read-only, never written back
+    else if (arg("--save-out")) save_out = argv[++i];       // at exit, the battery save as the run left it (for checking what a game wrote)
+    else if (arg("--dsi-camera-image")) camera_image = argv[++i];   // the picture the DSi cameras see (JPEG, PNG, BMP); default colour bars
+    else if (arg("--motion-pak")) motion_pak = argv[++i];   // retail | homebrew: the motion accessory in slot 2, held still (see --motion)
+    else if (arg("--motion")) {                              // AX,AY,AZ[,GZ]: what it feels, m/s^2 and rad/s (default 0,0,9.80665: lying flat)
+      if (std::sscanf(argv[++i], "%f,%f,%f,%f", &motion.ax, &motion.ay, &motion.az, &motion.gz) < 3) { std::fprintf(stderr, "--motion wants AX,AY,AZ[,GZ]\n"); return 2; }
+    }
     else if (arg("--gba-rom")) gba_rom = argv[++i];         // a GBA game in slot 2 (DS mode only)
     else if (arg("--gba-save")) gba_save = argv[++i];       // its save, read-only like --save; default none
     else if (arg("--gba-save-out")) gba_save_out = argv[++i];   // at exit, the GBA save as the run left it (for checking what a game wrote)
@@ -352,12 +409,14 @@ int main(int argc, char** argv) {
     else if (arg("--cheat")) enable_cheats.push_back(argv[++i]);   // enable one by name, or by "#N" from --list-cheats
     else if (!std::strcmp(argv[i], "--direct")) direct = true;
     else if (!std::strcmp(argv[i], "--interp")) jit = false;
-    else if (arg("--timing")) { const char* m = argv[++i]; if (!std::getenv("DS_TIMING")) ds::g_fast_timing = std::strcmp(m, "exact") != 0 && ds::kFastTimingAvailable; }   // CPU cycle model (timing_mode.h): fast (default) | exact; DS_TIMING wins
+    else if (arg("--timing")) { const char* m = argv[++i]; timing_given = true; if (!std::getenv("DS_TIMING") && !ds::set_timing(m)) { std::fprintf(stderr, "--timing: exact, fast or turbo\n"); return 2; } }   // CPU cycle model (timing_mode.h): fast (default) | exact | turbo; DS_TIMING wins
 
     else if (flag("--rtc-host")) rtc_host = true;                            // INEXACT by construction: runs stop being reproducible
     else if (arg("--firmware-override")) fw_override = argv[++i];            // load it, and write back what the firmware changed
+    else if (arg("--colour")) colour = argv[++i];                            // colour correction (video.colour): off | nds | nds_lite; shows in --dump-frames / --hash
     else if (flag("--no-aa")) no_aa = true;                                  // 3D anti-aliasing off (Renderer3D::set_aa); inexact, for measurement
-    else if (flag("--aa-enhanced")) aa_enhanced = true;
+    else if (flag("--aa-enhanced")) no_aa = false;                           // the old enhanced mode: plain anti-aliasing, as --aa on the SDL frontend
+    else if (arg("--gpu3d-scale")) gpu3d_scale = std::atoi(argv[++i]);   // the GPU raster at N times the DS's resolution; the composite here reads its 1x record
     else if (flag("--gpu3d")) gpu3d = true;   // the 3D layer on the GPU (Renderer3D::set_gpu, gpu_raster.h: Vulkan, else OpenGL ES); declines to the CPU without a driver
     else if (arg("--load-state")) load_state = argv[++i];                   // restore a save state before running
     else if (arg("--frameskip")) frameskip = std::atoi(argv[++i]);          // skip drawing N of every N+1 frames (Gpu::set_frame_skip); a dump of a skipped frame is stale
@@ -368,7 +427,21 @@ int main(int argc, char** argv) {
     else if (arg("--stats-from")) stats_from = std::atoi(argv[++i]);
     else if (arg("--pc-profile")) pc_profile = argv[++i];                   // a sampling profile of every thread from --stats-from on
     else if (arg("--save-state-at")) { save_state_at = std::atoi(argv[++i]); save_state_path = std::strchr(argv[i], ':'); if (save_state_path) ++save_state_path; }   // N:path -- write after N frames (0 = at once)
+    else if (!std::strncmp(argv[i], "--", 2)) { std::fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }
+    else if (rom) { std::fprintf(stderr, "two ROMs given: %s and %s\n", rom, argv[i]); return 2; }
     else rom = argv[i];
+  }
+  // No output may land on a file the run reads, or on an existing ROM, archive or save.
+  {
+    const char* const ins[] = {rom, bios9, bios7, fw, bios9i, bios7i, dsi_boot, dsi_nand, dsi_install, dsi_tmd, dsi_font,
+                               replay, save, gba_rom, gba_save, cheat_db, analog_db, load_state, camera_image};
+    const std::pair<const char*, const char*> outs[] = {
+        {"--dump-frames", dump}, {"--dump-3d", rec3d_path}, {"--dump-3d-fine", fine3d_path},
+        {"--dump-screens-scaled", screens_scaled_path}, {"--dump-gpu-frame", gpu_dump_path}, {"--hash-frames", hash_frames},
+        {"--dump-scaled", scaled_path}, {"--dump-audio", dump_audio}, {"--gba-save-out", gba_save_out}, {"--save-out", save_out},
+        {"--pc-profile", pc_profile}, {"--save-state-at", save_state_path}};
+    for (const auto& [opt, path] : outs)
+      if (path && !output_path_safe(opt, path, ins, sizeof ins / sizeof ins[0])) return 2;
   }
   // Without --direct, replay inputs land in the firmware setup wizard instead.
   if (replay && !direct)
@@ -385,6 +458,16 @@ int main(int argc, char** argv) {
 #else
               "");
 #endif
+  // A GPU frame dump is written from the polygon list, which a stream frame
+  // (DS_GPU_GEOM=only, the default) does not have: the list path for this run, unless asked otherwise.
+  if (gpu_dump_path && !std::getenv("DS_GPU_GEOM")) {
+    setenv("DS_GPU_GEOM", "off", 1);
+    std::fprintf(stderr, "gpu dump: DS_GPU_GEOM=off for this run (the dump needs the polygon list)\n");
+  }
+  auto dump_frame = [&](int i) {   // the frames the dumps write: --dump-at's, else the --dump-from/--dump-count window
+    if (!dump_at.empty()) return std::find(dump_at.begin(), dump_at.end(), i) != dump_at.end();
+    return i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count);
+  };
   ds::NDS nds;
   if (frameskip_capture) nds.gpu.set_frameskip_capture(true);
   if (hide_screen) nds.gpu.set_screen_visible(!std::strcmp(hide_screen, "bottom") ? 1 : 0, false);
@@ -501,6 +584,8 @@ int main(int argc, char** argv) {
     if (want && !nds.bios_native_dsi) { std::fprintf(stderr, "DSi mode needs --bios9i/--bios7i\n"); return 1; }
     if (want && !capable) std::fprintf(stderr, "warning: --dsi with a DS-only header (unit code %02x)\n", nds.cart ? nds.cart->header().unit_code : 0);
     if (want) {
+      // A DSi runs on the exact timing model unless --timing or DS_TIMING says otherwise (see the SDL frontend).
+      if (!timing_given && !std::getenv("DS_TIMING")) ds::set_timing("exact");
       nds.set_dsi(true);
       nds.dsi_nand_boot = dsi_nand_boot;
       if (dsi_hle && rom && !nds.dsi_nand_boot) {
@@ -526,7 +611,11 @@ int main(int argc, char** argv) {
     }
   }
   nds.gpu3d.renderer().set_aa(!no_aa);
-  nds.gpu3d.renderer().set_aa_enhanced(aa_enhanced);
+  if (colour) {
+    ds::gpu::ColourProfile cp;
+    if (!ds::gpu::parse_colour_profile(colour, cp)) { std::fprintf(stderr, "--colour: unknown profile %s (off | nds | nds_lite)\n", colour); return 2; }
+    nds.gpu.set_colour_profile(cp);
+  }
   std::vector<ds::u32> scaled_px[2]; std::vector<ds::u16> scaled_xrun; FILE* scaled_out = nullptr;
   if (scaled_n > 0 && scaled_path) {
     const ds::u32 W = ds::SCREEN_W * scaled_n, H = ds::SCREEN_H * scaled_n;
@@ -622,11 +711,24 @@ int main(int argc, char** argv) {
     nds.dsi_autoload(lo, hi);
     std::fprintf(stderr, "dsi: autoload %08x%08x (TLNC)\n", hi, lo);
   }
-  if (gba_rom || rumble_pak || guitar_grip) {
-    if ((gba_rom != nullptr) + rumble_pak + guitar_grip > 1) { std::fprintf(stderr, "--gba-rom, --rumble-pak and --guitar-grip each want slot 2\n"); return 2; }
+  if (camera_image) {
+    std::string err;
+    if (!ds::frontend::set_camera_image(nds, camera_image, err)) { std::fprintf(stderr, "camera: %s\n", err.c_str()); return 2; }
+    std::fprintf(stderr, "camera: looking at %s\n", camera_image);
+  }
+  if (motion_pak && std::strcmp(motion_pak, "retail") && std::strcmp(motion_pak, "homebrew")) { std::fprintf(stderr, "--motion-pak wants retail or homebrew\n"); return 2; }
+  if (gba_rom || rumble_pak || guitar_grip || motion_pak) {
+    if ((gba_rom != nullptr) + rumble_pak + guitar_grip + (motion_pak != nullptr) > 1) { std::fprintf(stderr, "--gba-rom, --rumble-pak, --guitar-grip and --motion-pak each want slot 2\n"); return 2; }
     if (nds.dsi) std::fprintf(stderr, "slot2: a DSi has no slot 2; ignored\n");
     else if (rumble_pak) { nds.slot2 = std::make_unique<ds::slot2::RumblePak>(); std::fprintf(stderr, "slot2: Rumble Pak\n"); }
     else if (guitar_grip) { nds.slot2 = std::make_unique<ds::slot2::GuitarGrip>(); std::fprintf(stderr, "slot2: Guitar Grip\n"); }
+    else if (motion_pak) {
+      const bool retail = !std::strcmp(motion_pak, "retail");
+      auto pak = std::make_unique<ds::slot2::MotionPak>(retail ? ds::slot2::MotionPak::Model::Retail : ds::slot2::MotionPak::Model::Homebrew);
+      pak->set_motion(motion);
+      nds.slot2 = std::move(pak);
+      std::fprintf(stderr, "slot2: %s, feeling %.2f %.2f %.2f m/s2, %.2f rad/s\n", retail ? "DS Motion Pack" : "DS Motion Card", motion.ax, motion.ay, motion.az, motion.gz);
+    }
     else {
       std::string err;
       std::unique_ptr<ds::slot2::GameCart> g = ds::slot2::load_game(gba_rom, gba_save ? gba_save : "", err);
@@ -667,16 +769,13 @@ int main(int argc, char** argv) {
   unsigned long long last9 = 0, last7 = 0;
   FILE* dump_out = dump ? std::fopen(dump, "wb") : nullptr;
   FILE* rec3d_out = rec3d_path ? std::fopen(rec3d_path, "wb") : nullptr;
+  FILE* fine3d_out = fine3d_path ? std::fopen(fine3d_path, "wb") : nullptr;
+  FILE* screens_scaled_out = screens_scaled_path ? std::fopen(screens_scaled_path, "wb") : nullptr;
+  std::vector<ds::u32> screens_scaled_px;
   if (dump && !dump_out) { std::fprintf(stderr, "could not open %s\n", dump); return 1; }
   if (gpu_dump_path && gpu_dump_frame >= 0) nds.gpu3d.renderer().set_gpu_dump(gpu_dump_path, static_cast<ds::u64>(gpu_dump_frame));
+  nds.gpu3d.renderer().set_gpu_scale(static_cast<ds::u32>(gpu3d_scale));
   if (gpu3d) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); }
-  FILE* cut_out = nullptr; std::vector<ds::u32> cut_px;
-  if (cut_n > 0 && cut_path) {
-    cut_out = std::fopen(cut_path, "wb");
-    if (!cut_out) { std::fprintf(stderr, "could not open %s\n", cut_path); return 1; }
-    cut_px.resize(static_cast<size_t>(256 * cut_n) * static_cast<size_t>(192 * cut_n));
-    nds.gpu.set_edge_export(true);
-  }
   FILE* hash_out = hash_frames ? std::fopen(hash_frames, "w") : nullptr;
   if (hash_frames && !hash_out) { std::fprintf(stderr, "could not open %s\n", hash_frames); return 1; }
   ds::input::Log log;
@@ -863,6 +962,25 @@ int main(int argc, char** argv) {
     } else
 #endif
     nds.run_frame();
+    // DS_HAND_FRAME=1 (a check): every frame handed as a frontend with a present thread takes it (Gpu::hand_frame);
+    // =2: every other frame. The picture and every hash must be what they are without it.
+    if (static const int hand = std::getenv("DS_HAND_FRAME") ? std::atoi(std::getenv("DS_HAND_FRAME")) : 0; hand == 1 || (hand == 2 && (nds.frame_count & 1)) || (hand == 3 && nds.frame_count % 3 == 0)) nds.gpu.hand_frame();
+    if (screens_scaled_out && dump_frame(i)) {
+      const ds::u32 n = static_cast<ds::u32>(std::max(1, gpu3d_scale));
+      screens_scaled_px.resize(static_cast<size_t>(ds::SCREEN_W) * n * ds::SCREEN_H * n);
+      for (int k = 0; k < 2; ++k) {
+        if (!nds.gpu.merge_split3d_scaled(k, n, screens_scaled_px.data())) {   // no full-scale record (a CPU frame): the 1x picture repeated
+          static bool said = false;
+          if (!said) { std::fprintf(stderr, "dump-screens-scaled: frame %d screen %d has no %ux record; written at 1x repeated\n", i, k, n); said = true; }
+          nds.gpu.merge_split3d(k, screens_scaled_px.data());
+          for (ds::u32 y = ds::SCREEN_H * n; y-- > 0;)
+            for (ds::u32 x = ds::SCREEN_W * n; x-- > 0;) screens_scaled_px[static_cast<size_t>(y) * ds::SCREEN_W * n + x] = screens_scaled_px[(y / n) * ds::SCREEN_W + x / n];
+        }
+        for (ds::u32& c : screens_scaled_px) c = ((c >> 18) & 0x3F) | (((c >> 10) & 0x3F) << 8) | (((c >> 2) & 0x3F) << 16) | (31u << 24);   // 0xAARRGGBB to RGB666
+        std::fwrite(screens_scaled_px.data(), 4, screens_scaled_px.size(), screens_scaled_out);
+      }
+    }
+    nds.gpu.resolve_split3d();   // DS_SPLIT3D=present: the split a GPU compositor would merge, merged on the CPU
     if (!write_state(i + 1)) return 1;
     if (static const bool fh = std::getenv("DS_FRAME_HASH") != nullptr; fh) {
       auto fnv = [](const ds::u8* p, size_t n, ds::u64 h) { for (size_t k = 0; k < n; ++k) h = (h ^ p[k]) * 1099511628211ull; return h; };
@@ -884,24 +1002,25 @@ int main(int argc, char** argv) {
         std::fwrite(nds.bus.arm7_wram.get(), 1, 64u << 10, f); std::fwrite(nds.bus.dtcm.get(), 1, 16u << 10, f); std::fclose(f);
       }
     }
-    if (scaled_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count))
+    if (scaled_out && dump_frame(i))
       for (int k = 0; k < 2; ++k) std::fwrite(scaled_px[k].data(), 4, scaled_px[k].size(), scaled_out);
-    if (cut_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count))
-      for (int k = 0; k < 2; ++k) {
-        ds::gpu::edge_cut_screen(nds.gpu.framebuffer(k), nds.gpu.edge_plane(k), cut_n, cut_px.data(), std::getenv("DS_EDGE_BLEND") ? static_cast<float>(std::atof(std::getenv("DS_EDGE_BLEND"))) : 1.0f);
-        std::fwrite(cut_px.data(), 4, cut_px.size(), cut_out);
-      }
-    if (cut_out && std::getenv("DS_DUMP_EDGE") && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count)) {   // DS_DUMP_EDGE=FILE with --dump-cut: the top screen's edge plane words (Renderer3D::set_edge_export) of the last dumped frame
-      FILE* ef = std::fopen(std::getenv("DS_DUMP_EDGE"), "wb"); std::fwrite(nds.gpu.edge_plane(0), 4, 256 * 192, ef); std::fclose(ef);
-    }
-    if (dump_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count)) {
+    if (dump_out && dump_frame(i)) {
       // raw 0xAARRGGBB, top screen then bottom, 256x192 each, one record per frame
       std::fwrite(nds.gpu.framebuffer(0), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);
       std::fwrite(nds.gpu.framebuffer(1), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);
     }
-    if (rec3d_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count)) {
+    if (rec3d_out && dump_frame(i)) {
       const auto ref = nds.gpu3d.frame_ref(false);
       for (int y = 0; y < static_cast<int>(ds::SCREEN_H); ++y) std::fwrite(nds.gpu3d.line(ref, static_cast<ds::u32>(y)), 4, ds::SCREEN_W, rec3d_out);
+    }
+    if (fine3d_out && dump_frame(i)) {
+      const auto ref = nds.gpu3d.frame_ref(false);
+      (void)nds.gpu3d.line(ref, 0);   // picks the frame's record
+      ds::u32 sc = static_cast<ds::u32>(gpu3d_scale);
+      const ds::u32* fine = nds.gpu3d.renderer().gpu_fine(ref, &sc);
+      const size_t words = static_cast<size_t>(ds::SCREEN_W) * sc * ds::SCREEN_H * sc;
+      if (fine) std::fwrite(fine, 4, words, fine3d_out);
+      else { static std::vector<ds::u32> zeros; zeros.assign(words, 0); std::fwrite(zeros.data(), 4, words, fine3d_out); }
     }
     if (hash_out) {
       auto fnv = [](const ds::u32* p) { ds::u64 h = 1469598103934665603ull; for (ds::u32 k = 0; k < ds::SCREEN_W * ds::SCREEN_H; ++k) h = (h ^ p[k]) * 1099511628211ull; return h; };
@@ -949,7 +1068,6 @@ int main(int argc, char** argv) {
     else std::fprintf(stderr, "firmware override: saved %s\n", fw_override);
   }
   if (dump_out) std::fclose(dump_out);
-  if (cut_out) std::fclose(cut_out);
   if (hash_out) std::fclose(hash_out);
   if (scaled_out) std::fclose(scaled_out);
   if (audio_out) std::fclose(audio_out);
@@ -1012,6 +1130,13 @@ int main(int argc, char** argv) {
     std::string err;
     if (ds::slot2::write_save(*g, gba_save_out, err)) std::fprintf(stderr, "slot2: wrote the GBA save to %s\n", gba_save_out);
     else std::fprintf(stderr, "slot2: %s\n", err.c_str());
+  }
+  if (nds.dsi_dsp_started) std::fprintf(stderr, "dsp: the title started the DSP\n");
+  if (nds.cart && save_out) {
+    std::string err;
+    std::fprintf(stderr, "save: %u chip writes\n", nds.cart->sram_writes());
+    if (ds::write_file_atomic(save_out, nds.cart->sram().data(), nds.cart->sram().size(), err)) std::fprintf(stderr, "save: wrote %s\n", save_out);
+    else std::fprintf(stderr, "save: %s\n", err.c_str());
   }
   std::fprintf(stderr, "ran %llu frames, %llu cycles\n",
               static_cast<unsigned long long>(nds.frame_count),

@@ -115,6 +115,10 @@ public:
   u32 read32(Cpu cpu, u32 addr);
   // Fetch fallback for pages not directly mapped; DSi ARM7 BIOS lives here.
   u32 fetch(Cpu cpu, u32 addr, u32 width);
+  // The DS ARM7 BIOS: code that no page-table entry backs (see update_bios_map)
+  // and that Bus::fetch serves. The recompilers run a block on through it.
+  bool bios7_code(Cpu cpu, u32 addr) const;
+  static bool bios7_protect;   // see bus.cpp; read when the BIOS is mapped (update_bios_map)
   void write8 (Cpu cpu, u32 addr, u8  v);
   void write16(Cpu cpu, u32 addr, u16 v);
   void write32(Cpu cpu, u32 addr, u32 v);
@@ -146,6 +150,9 @@ public:
   // Pages of the ARM9 0x06000000 window with a host (rebuilt by update_vram):
   // the write trap toggles visit these, not all 8 K entries.
   u64 vram_mapped9_[VRAM_PAGES / 64] = {};
+  // The last set_vram_trap: update_vram re-applies it over the pages it remaps.
+  bool vram_trap_on_ = false, vram_trap_lcdc_ = false;
+  u32 vram_trap_windows_ = 0;
   static constexpr u32 VRAM_BANK_SIZES[9] = {0x20000, 0x20000, 0x20000, 0x20000, 0x10000, 0x4000, 0x4000, 0x8000, 0x4000};
   static constexpr u32 VRAM_TOTAL = 0x20000 * 4 + 0x10000 + 0x4000 * 2 + 0x8000 + 0x4000;
 
@@ -160,6 +167,11 @@ private:
   NDS& nds_;
   Timing timing_;
   gpu::VramMap vram_map_;
+public:
+  // The DSi DSP's own view of NWRAM B (its program) and C (its data): the
+  // 32 KB slot's host memory, or null where MBK gives the DSP none.
+  u8* nwram_dsp(int bank, u32 slot) const { return nwram_map_[bank][2][slot & 7]; }
+private:
   u32 vram_read(Cpu cpu, u32 addr, u32 width);
   u32 slot2_read(Cpu cpu, u32 addr, u32 width);    // 0x08000000-0x0AFFFFFF on a DS
   void slot2_write(Cpu cpu, u32 addr, u32 width, u32 v);

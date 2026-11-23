@@ -302,7 +302,25 @@ class LibraryActivity : AppCompatActivity() {
         return DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:")
     }
 
-    private fun launch(game: Game) = startActivity(EmulatorActivity.intent(this, game))
+    private fun launch(game: Game) = start(game)
+
+    /**
+     * Starts the emulator on [game]. Android refuses the start when the app no longer holds
+     * the ROM folder's grant: a reinstall drops it, while the settings (and with them the
+     * folder) come back from the device backup. The folder is then asked for again.
+     */
+    private fun start(game: Game, loadSlot: Int = -1) {
+        try {
+            startActivity(EmulatorActivity.intent(this, game, loadSlot))
+        } catch (_: SecurityException) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.folder_access_lost_title)
+                .setMessage(R.string.folder_access_lost)
+                .setPositiveButton(R.string.choose_folder) { _, _ -> pickFolder.launch(initialFolder()) }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
+    }
 
     /**
      * A tap on a game. With an automatic save from last time, asks first: starting fresh by
@@ -321,7 +339,7 @@ class LibraryActivity : AppCompatActivity() {
         MaterialAlertDialogBuilder(this)
             .setTitle(adapter.titleOf(game))
             .setView(content)
-            .setPositiveButton(R.string.continue_yes) { _, _ -> startActivity(EmulatorActivity.intent(this, game, SaveStateSlot.AUTO)) }
+            .setPositiveButton(R.string.continue_yes) { _, _ -> start(game, SaveStateSlot.AUTO) }
             .setNegativeButton(R.string.continue_no) { _, _ -> launch(game) }
             .show()
     }
@@ -331,7 +349,7 @@ class LibraryActivity : AppCompatActivity() {
         val hasSave = paths.savFile(game.stem).isFile
         val options = mutableListOf<Pair<Int, () -> Unit>>()
         options += R.string.game_play to { launch(game) }
-        if (auto.exists) options += R.string.game_resume to { startActivity(EmulatorActivity.intent(this, game, SaveStateSlot.AUTO)) }
+        if (auto.exists) options += R.string.game_resume to { start(game, SaveStateSlot.AUTO) }
         options += R.string.game_import_save to { pendingSaveGame = game; importSave.launch(arrayOf("*/*")) }
         if (hasSave) options += R.string.game_export_save to { pendingSaveGame = game; exportSave.launch("${game.stem}.sav") }
         if (hasSave) options += R.string.game_delete_save to { confirmDeleteSave(game) }

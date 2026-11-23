@@ -6,6 +6,7 @@
 // team; its Flash handling is in turn from DeSmuME).
 #include "core/slot2/slot2.h"
 #include "core/state/state.h"
+#include "core/safe_file.h"
 
 #include <cstdio>
 #include <cstring>
@@ -263,10 +264,14 @@ template <class S> void GameCart::sync(S& s) {
     // before the state was taken is what it will read back.
     if (n > 256 * 1024) { s.fail("GBA save too large"); return; }
     save_type_ = static_cast<SaveType>(type);
+    // Not a write of the game's: the file waits for one (save_from_state).
+    const std::vector<u8> before = save_;
     save_.resize(n);
+    s.blob(save_.data(), save_.size());
+    if (save_ != before) save_from_state_ = true;
+  } else {
+    s.blob(save_.data(), save_.size());
   }
-  s.blob(save_.data(), save_.size());
-  if constexpr (S::reading) if (n) mark_dirty();
 }
 
 std::unique_ptr<GameCart> load_game(const std::string& rom_path, const std::string& save_path, std::string& err) {
@@ -308,14 +313,9 @@ bool peek_game(const std::string& rom_path, char code[5], char title[13]) {
   return true;
 }
 
-bool write_save(const GameCart& cart, const std::string& path, std::string& err) {
+bool write_save(const GameCart& cart, const std::string& path, std::string& err, const std::string& keep_as) {
   if (cart.save().empty()) return true;
-  const std::string tmp = path + ".tmp";
-  FILE* f = std::fopen(tmp.c_str(), "wb");
-  if (!f) { err = "cannot write " + tmp; return false; }
-  const bool ok = std::fwrite(cart.save().data(), 1, cart.save().size(), f) == cart.save().size();
-  if (std::fclose(f) != 0 || !ok || std::rename(tmp.c_str(), path.c_str()) != 0) { err = "cannot write " + path; return false; }
-  return true;
+  return write_file_atomic(path, cart.save().data(), cart.save().size(), err, keep_as);
 }
 
 void RumblePak::rom_write16(u32, u16 v) {
@@ -327,6 +327,53 @@ void RumblePak::rom_write16(u32, u16 v) {
 u8 GuitarGrip::sram_read8(u32) {
   return static_cast<u8>(~(((frets_ & Green) ? 0x40 : 0) | ((frets_ & Red) ? 0x20 : 0) | ((frets_ & Yellow) ? 0x10 : 0) | ((frets_ & Blue) ? 0x08 : 0)));
 }
+
+// ---- motion ----------------------------------------------------------------
+namespace {
+constexpr float kG = 9.80665f;
+int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+// Both accelerometers span +-2.5 g around mid-scale.
+int accel12(float a) { return clampi(static_cast<int>((a / (5 * kG) + 0.5f) * 4096), 0, 4095); }
+int accel8(float a)  { return clampi(static_cast<int>((a / (5 * kG) + 0.5f) * 256), 0, 254); }
+// The gyroscope: 0.825 counts per degree a second around 1680 (melonDS's figures).
+int gyro12(float rad_s) { return clampi(static_cast<int>(rad_s * 57.29578f * 0.825f + 1680 + 0.5f), 0, 4095); }
+} // namespace
+
+u8 MotionPak::sram_read8(u32 addr) {
+  if (model_ == Model::Homebrew) {
+    // An even address latches a reading into the shift register and answers 0;
+    // address 0 clocks the register out, high byte first.
+    switch (addr & 0xFFFF) {
+    case 0: break;
+    case 2: shift_ = static_cast<u16>(accel12(motion_.ax) << 4); return 0;
+    case 4: shift_ = static_cast<u16>(accel12(motion_.ay) << 4); return 0;
+    case 6: shift_ = static_cast<u16>(accel12(motion_.az) << 4); return 0;
+    case 8: shift_ = static_cast<u16>(gyro12(-motion_.gz) << 4); return 0;
+    case 10: shift_ = 0xF00F; return 0;                      // the ID libnds looks for
+    case 12: case 14: case 16: case 18: shift_ = 0; break;   // the analog inputs: nothing is wired to them
+    default: break;
+    }
+    const u8 v = static_cast<u8>(shift_ >> 8);
+    shift_ = static_cast<u16>(shift_ << 8);
+    return v;
+  }
+  // Retail: a cycle of 17 reads. Four give 0xFF two bits at a time (the
+  // sync), four each give X, Y and Z, and the last answers 0.
+  switch (step_) {
+  case 0: value_ = 0xFF; break;
+  case 4: value_ = static_cast<u8>(accel8(motion_.ax)); break;
+  case 8: value_ = static_cast<u8>(accel8(motion_.ay)); break;
+  case 12: value_ = static_cast<u8>(accel8(motion_.az)); break;
+  case 16: step_ = 0; return 0;
+  default: break;
+  }
+  const int sh = 6 - (step_ & 3) * 2;
+  ++step_;
+  return static_cast<u8>((value_ >> sh) & 3);
+}
+
+void MotionPak::sync_state(state::Writer& w) { w.put(shift_); w.put(value_); w.put(step_); }
+void MotionPak::sync_state(state::Reader& r) { r.put(shift_); r.put(value_); r.put(step_); if (step_ > 16) step_ = 16; }
 
 void RumblePak::sync_state(state::Writer& w) { w.put(state_); }
 void RumblePak::sync_state(state::Reader& r) { r.put(state_); }

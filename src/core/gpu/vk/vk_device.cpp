@@ -165,7 +165,14 @@ std::unique_ptr<Device> Device::create(std::string* why) {
   std::vector<VkPhysicalDevice> devs(n);
   d.api.vkEnumeratePhysicalDevices(d.inst, &n, devs.data());
   // DS_VK_DEVICE: pick physical device by index or name substring; DS_VK_LIST_EXT lists them.
-  d.phys = devs[0];
+  // Left to itself it takes the first hardware device, and none at all where the loader has only a software
+  // one: Mesa's llvmpipe beside a GPU blob with no ICD of its own (the RK3326 images) is slower than every CPU
+  // path it would replace. Naming it in DS_VK_DEVICE still selects it.
+  d.phys = VK_NULL_HANDLE;
+  for (u32 i = 0; i < n && !d.phys; ++i) {
+    VkPhysicalDeviceProperties pp{}; d.api.vkGetPhysicalDeviceProperties(devs[i], &pp);
+    if (pp.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU) d.phys = devs[i];
+  }
   if (const char* pick = std::getenv("DS_VK_DEVICE")) {
     char* end = nullptr;
     const long idx = std::strtol(pick, &end, 10);
@@ -177,11 +184,13 @@ std::unique_ptr<Device> Device::create(std::string* why) {
   }
   if (std::getenv("DS_VK_LIST_EXT"))
     for (u32 i = 0; i < n; ++i) { VkPhysicalDeviceProperties pp{}; d.api.vkGetPhysicalDeviceProperties(devs[i], &pp); std::fprintf(stderr, "vk: device %u: %s%s\n", i, pp.deviceName, devs[i] == d.phys ? " (selected)" : ""); }
+  if (!d.phys) return set("only a software Vulkan device");
 
   VkPhysicalDeviceProperties props{};
   d.api.vkGetPhysicalDeviceProperties(d.phys, &props);
   d.api.vkGetPhysicalDeviceMemoryProperties(d.phys, &d.memprops);
   self->name_ = props.deviceName;
+  self->limits_.vendor_id = props.vendorID;
   self->limits_.max_workgroup_invocations = props.limits.maxComputeWorkGroupInvocations;
   self->limits_.max_shared_memory = props.limits.maxComputeSharedMemorySize;
   self->limits_.max_storage_range = props.limits.maxStorageBufferRange;
@@ -205,7 +214,7 @@ std::unique_ptr<Device> Device::create(std::string* why) {
   d.api.vkEnumerateDeviceExtensionProperties(d.phys, nullptr, &ne, nullptr);
   std::vector<VkExtensionProperties> exts(ne);
   d.api.vkEnumerateDeviceExtensionProperties(d.phys, nullptr, &ne, exts.data());
-  bool has_gprio = false, has_atomic64_ext = false, has_fd = false, has_dmabuf = false, has_modifier = false, has_fmtlist = false, has_foreign = false, has_roaa = false, has_swapchain = false;
+  bool has_gprio = false, has_atomic64_ext = false, has_fd = false, has_dmabuf = false, has_modifier = false, has_fmtlist = false, has_foreign = false, has_roaa = false, has_swapchain = false, has_f16 = false, has_rp2 = false, has_dsres = false;
   for (const auto& e : exts) {
     if (!std::strcmp(e.extensionName, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) d.has_host_import = true;
     if (!std::strcmp(e.extensionName, VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME)) has_atomic64_ext = true;
@@ -216,12 +225,16 @@ std::unique_ptr<Device> Device::create(std::string* why) {
     if (!std::strcmp(e.extensionName, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME)) has_foreign = true;
     if (!std::strcmp(e.extensionName, VK_EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME)) has_roaa = true;
     if (!std::strcmp(e.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) has_swapchain = true;
+    if (!std::strcmp(e.extensionName, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME)) has_f16 = true;
     if (!std::strcmp(e.extensionName, VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME)) has_gprio = true;
+    if (!std::strcmp(e.extensionName, VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME)) has_rp2 = true;
+    if (!std::strcmp(e.extensionName, VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME)) has_dsres = true;
 #if defined(VK_ANDROID_external_memory_android_hardware_buffer)
     if (!std::strcmp(e.extensionName, VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME)) self->limits_.ahb_import = props.apiVersion >= VK_API_VERSION_1_1;
 #endif
   }
   self->limits_.present = !inst_exts.empty() && has_swapchain;
+  self->limits_.depth_resolve = has_rp2 && has_dsres && d.api.vkCreateRenderPass2KHR;   // sample 0 is the mode every driver has
   self->limits_.dmabuf_import = has_fd && has_dmabuf;
   self->limits_.drm_modifier = self->limits_.dmabuf_import && has_modifier && has_fmtlist;
   VkPhysicalDeviceShaderAtomicInt64Features at64{};
@@ -232,11 +245,17 @@ std::unique_ptr<Device> Device::create(std::string* why) {
   f2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
   f2.pNext = &at64;
   if (has_roaa) at64.pNext = &roaa;
+  VkPhysicalDeviceShaderFloat16Int8Features f16{};
+  f16.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+  if (has_f16) { f16.pNext = f2.pNext; f2.pNext = &f16; }
   if (d.api.vkGetPhysicalDeviceFeatures2 && (has_atomic64_ext || has_roaa || props.apiVersion >= VK_API_VERSION_1_2)) {
     d.api.vkGetPhysicalDeviceFeatures2(d.phys, &f2);
     self->limits_.int64_atomics = (has_atomic64_ext || props.apiVersion >= VK_API_VERSION_1_2) && f2.features.shaderInt64 && at64.shaderBufferInt64Atomics;
     self->limits_.ordered_attachments = has_roaa && roaa.rasterizationOrderColorAttachmentAccess;
+    self->limits_.ordered_depth = self->limits_.ordered_attachments && roaa.rasterizationOrderDepthAttachmentAccess;
+    self->limits_.float16 = (has_f16 || props.apiVersion >= VK_API_VERSION_1_2) && f16.shaderFloat16;
     self->limits_.msaa4 = f2.features.sampleRateShading && (props.limits.framebufferColorSampleCounts & props.limits.framebufferDepthSampleCounts & VK_SAMPLE_COUNT_4_BIT);
+    self->limits_.fragment_stores = f2.features.fragmentStoresAndAtomics;
   }
   // DS_VK_LIST_EXT=1: what this driver actually offers.
   if (std::getenv("DS_VK_LIST_EXT")) {
@@ -269,18 +288,27 @@ std::unique_ptr<Device> Device::create(std::string* why) {
   if (self->limits_.ahb_import) want.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
 #endif
   if (self->limits_.ordered_attachments) want.push_back(VK_EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME);
+  if (self->limits_.float16 && has_f16) want.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
   if (self->limits_.present) want.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+  if (self->limits_.depth_resolve) { want.push_back(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME); want.push_back(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME); }
   VkPhysicalDeviceShaderAtomicInt64Features en64{};
   en64.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES;
   en64.shaderBufferInt64Atomics = VK_TRUE;
   VkPhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT enroaa{};
   enroaa.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_FEATURES_EXT;
   enroaa.rasterizationOrderColorAttachmentAccess = VK_TRUE;
+  enroaa.rasterizationOrderDepthAttachmentAccess = self->limits_.ordered_depth ? VK_TRUE : VK_FALSE;
   VkPhysicalDeviceFeatures2 enf{};
   enf.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
   if (self->limits_.int64_atomics) { enf.pNext = &en64; enf.features.shaderInt64 = VK_TRUE; }
   if (self->limits_.ordered_attachments) { enroaa.pNext = enf.pNext; enf.pNext = &enroaa; }
+  VkPhysicalDeviceShaderFloat16Int8Features enf16{};
+  enf16.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+  enf16.shaderFloat16 = VK_TRUE;
+  if (self->limits_.float16) { enf16.pNext = enf.pNext; enf.pNext = &enf16; }
   if (self->limits_.msaa4) enf.features.sampleRateShading = VK_TRUE;
+  if (self->limits_.fragment_stores) enf.features.fragmentStoresAndAtomics = VK_TRUE;
+  if (std::getenv("DS_LEAN_OCC") && f2.features.occlusionQueryPrecise) enf.features.occlusionQueryPrecise = VK_TRUE;   // the raster's per-pass sample counts (debug)
 
   // Two queues where the family has them: the second is the 3D raster's
   // own. The present path's jobs wait on the panel (a dma-buf still being
@@ -311,7 +339,7 @@ std::unique_ptr<Device> Device::create(std::string* why) {
   di.pQueueCreateInfos = &qi;
   di.enabledExtensionCount = static_cast<u32>(want.size());
   di.ppEnabledExtensionNames = want.empty() ? nullptr : want.data();
-  if (self->limits_.int64_atomics || self->limits_.ordered_attachments || self->limits_.msaa4) di.pNext = &enf;
+  if (self->limits_.int64_atomics || self->limits_.ordered_attachments || self->limits_.msaa4 || self->limits_.float16) di.pNext = &enf;
   if (d.api.vkCreateDevice(d.phys, &di, nullptr, &d.dev) != VK_SUCCESS) {
     // A priority the process may not take (VK_ERROR_NOT_PERMITTED) or a driver quirk: once more without it.
     if (!qi.pNext) return set("vkCreateDevice failed");

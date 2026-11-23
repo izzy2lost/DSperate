@@ -27,7 +27,7 @@ object NativeLib {
         gpu3d: Boolean,
         gpuScale: Int,
         texFilter: Boolean,
-        /** 0 off, 1 on, 2 enhanced (the edge cut). */
+        /** 0 off, 1 on. */
         antiAliasing: Int,
         rumble: Boolean,
         guitarGrip: Boolean,

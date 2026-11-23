@@ -44,8 +44,10 @@ constexpr char kFaceEast  = '\x02';   // right   (SDL b)
 constexpr char kFaceWest  = '\x03';   // left    (SDL x)
 constexpr char kFaceNorth = '\x04';   // top     (SDL y)
 
-// A 5x7 uppercase font, `scale` times. Lowercase folds to uppercase; anything
-// outside the table draws as a space. Returns the x past the string.
+// A 5x7 uppercase font, `scale` times. Lowercase folds to uppercase (Greek and
+// Cyrillic too); what the 5x7 font lacks comes from the built-in DSi fonts at
+// scale/2 (ui_font.h), and '?' when they lack it as well. Returns the x past
+// the string.
 // `keep_case` draws a-z as lower-case glyphs instead of folding; used only by
 // the name editor, where the player must see which case they're typing.
 int  draw_text(const Canvas& d, int x, int y, int scale, u32 colour, const char* s, bool keep_case = false);
@@ -225,6 +227,8 @@ private:
   // reads SURE? in red), second A deletes. Auto state is reachable only here.
   bool slot_delete_ = false, slot_armed_ = false;
   std::string slot_notice_;
+  // The root page's slot row for `slot`, with the notice after it.
+  std::string slot_row_text(int slot) const;
   bool used_[kAutoSlot + 1] = {};
 
   std::vector<cheat::Code>* codes_ = nullptr;

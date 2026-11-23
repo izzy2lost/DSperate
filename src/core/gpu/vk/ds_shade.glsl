@@ -5,91 +5,99 @@
 // Texture sampling, colour combine, alpha blend, shared by the resolve pass
 // and raster's ordered tail. Includer must declare Texels/Post and `pc` first.
 
+// DS_MP: the precision of the colour path (B2 of GPU-RENDER-PLAN). mediump
+// (RelaxedPrecision in SPIR-V) runs it in 16 bits on Mali, exact for DS
+// colour maths (below 2^12): 4-8% off the G52's 4x frame. The GLES raster
+// keeps highp (gl_common.glsl): the RG35XX SP's driver gained nothing from it.
+// DS_TOON: whether the program shades mode 2 (toon / highlight). A constant:
+// the Vulkan stages define it from a specialisation constant, GLES by #define.
+#ifndef DS_TOON
+#define DS_TOON true
+#endif
+#ifndef DS_MP
+#define DS_MP mediump
+#endif
+
 // ---- texture ---------------------------------------------------------------
 
 // Texel: 16-bit RGB555 in low half, 5-bit alpha above.
-uint sample_tex(GpuPoly p, int s, int t) {
-  int w = int(p.tex_w), h = int(p.tex_h);
-  s >>= 4; t >>= 4;
+// The texel coordinate's wrap, clamp and flip run at DS_MP (16-bit on
+// Mali: texels are at most 1024 apart, so a 12.4 coordinate >> 4 fits);
+// the address into the arena stays highp.
+#ifdef DS_WRAP_VARY
+// The wrap from the vertex stage's words (lean.vert poly_out): the clamp is already in the
+// polygon's texcoord bounds, a repeat is the mask and a mirrored repeat the mask over two periods folded by the
+// min. On the G52 the per-axis branches below were 8% of a 4x frame.
+uint sample_tex(GpuPoly p, int s12, int t12) {
+  ivec2 st = (ivec2(s12, t12) >> 4) & DS_WRAP_VARY.xy;
+  st = min(st, DS_WRAP_VARY.zw - st);
+  highp int a = int(p.tex_offset) + st.y * int(p.tex_w) + st.x;
+#ifdef DS_TEXEL_BUFFER
+  return texelFetch(texels_tb, a).r;
+#else
+  return texels[uint(a)];   // the GLES raster's arena is a storage buffer
+#endif
+}
+#else
+uint sample_tex(GpuPoly p, int s12, int t12) {
+  DS_MP int w = int(p.tex_w), h = int(p.tex_h);
+  DS_MP int s = s12 >> 4, t = t12 >> 4;
   bool rep_s = (p.texparam & 0x10000u) != 0u, rep_t = (p.texparam & 0x20000u) != 0u;
   bool flp_s = (p.texparam & 0x40000u) != 0u, flp_t = (p.texparam & 0x80000u) != 0u;
   if (rep_s) { if (flp_s && (s & w) != 0) s = (w - 1) - (s & (w - 1)); else s &= w - 1; }
   else       s = clamp(s, 0, w - 1);
   if (rep_t) { if (flp_t && (t & h) != 0) t = (h - 1) - (t & (h - 1)); else t &= h - 1; }
   else       t = clamp(t, 0, h - 1);
+  // highp copies first: a GLSL ES constructor keeps its argument's
+  // precision, and t * w reaches 2^20.
+  highp int hs = s, ht = t, hw = w;
 #ifdef DS_TEXEL_BUFFER
-  return texelFetch(texels_tb, int(p.tex_offset + uint(t * w + s))).r;
+  return texelFetch(texels_tb, int(p.tex_offset) + ht * hw + hs).r;
 #else
-  return texels[p.tex_offset + uint(t * w + s)];
+  return texels[p.tex_offset + uint(ht * hw + hs)];
 #endif
 }
 
+#endif
+
 // 15-bit channel -> 6 bits: bits 1-5 of the field, +1 when non-zero.
-uint c15_to_18(uint c, uint shift) {
-  uint v = ((shift == 0u ? (c << 1) : (c >> shift)) & 0x3Eu);
+DS_MP uint c15_to_18(DS_MP uint c, uint shift) {
+  DS_MP uint v = ((shift == 0u ? (c << 1) : (c >> shift)) & 0x3Eu);
   return v != 0u ? v + 1u : v;
-}
-
-// The texel at (s, t) as 6-bit RGB and 5-bit alpha.
-uvec4 tex_rgba(GpuPoly p, int s, int t) {
-  uint packed = sample_tex(p, s, t);
-  uint c = packed & 0xFFFFu;
-  return uvec4(c15_to_18(c, 0u), c15_to_18(c, 4u), c15_to_18(c, 9u), (packed >> 16) & 0x1Fu);
-}
-
-// Bilinear filtering over the four texels around (s, t), 12.4 coordinates,
-// each fetched through the DS's own wrap/flip/clamp. Colour is weighted by
-// alpha (a transparent texel's colour is not its picture), then rounded back
-// to the DS's precision for the combine. An enhancement, not the hardware.
-//
-// `lo`/`hi`: the polygon's texcoord bounds (12.4). The taps stay on the
-// texels the polygon covers: half a texel past its edge, a repeating
-// texture's wrap would fetch the far side of the texture (a sprite's top
-// row blending with its solid bottom row draws a line along the edge).
-// A polygon that does tile spans past one repeat, so its wraps are kept.
-uvec4 tex_rgba_filtered(GpuPoly p, vec2 st, vec2 lo, vec2 hi) {
-  vec2 u = st / 16.0 - 0.5;
-  vec2 b = floor(u), f = u - b;
-  vec2 first = floor(lo / 16.0), last = max(ceil(hi / 16.0) - 1.0, first);
-  ivec2 i0 = ivec2(clamp(b, first, last)) * 16, i1 = ivec2(clamp(b + 1.0, first, last)) * 16;
-  vec4 c00 = vec4(tex_rgba(p, i0.x, i0.y)), c10 = vec4(tex_rgba(p, i1.x, i0.y));
-  vec4 c01 = vec4(tex_rgba(p, i0.x, i1.y)), c11 = vec4(tex_rgba(p, i1.x, i1.y));
-  vec4 w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
-  vec4 wa = w * vec4(c00.a, c10.a, c01.a, c11.a);
-  float asum = wa.x + wa.y + wa.z + wa.w;
-  float a = dot(w, vec4(c00.a, c10.a, c01.a, c11.a));
-  vec3 rgb = asum > 0.0 ? (c00.rgb * wa.x + c10.rgb * wa.y + c01.rgb * wa.z + c11.rgb * wa.w) / asum : c00.rgb;
-  return uvec4(uvec3(clamp(round(rgb), 0.0, 63.0)), uint(clamp(round(a), 0.0, 31.0)));
 }
 
 // ---- the pixel -------------------------------------------------------------
 
-uint shade_texel(GpuPoly p, uint blendmode, uint polyalpha, bool textured,
-                 int vr9, int vg9, int vb9, uvec4 texel);
-
-uint shade_pixel(GpuPoly p, uint blendmode, uint polyalpha, bool textured,
-                 int vr9, int vg9, int vb9, int s, int t) {
-  return shade_texel(p, blendmode, polyalpha, textured, vr9, vg9, vb9, textured ? tex_rgba(p, s, t) : uvec4(0u));
+// The pixel's 6-bit r, g, b and 5-bit alpha. All of it at mediump: DS
+// colour maths stays below 2^12, exact in 16 bits, which Bifrost runs two
+// to a lane (B2 of GPU-RENDER-PLAN).
+// shade_texel takes the texel word (sample_tex's) and shade_alpha makes the alpha alone from it, for a stage
+// that tests the alpha before it pays for the colour (lean.frag: a discarded pixel stops there).
+DS_MP uint shade_alpha(DS_MP uint blendmode, DS_MP uint polyalpha, bool textured, uint texw) {
+  if (!textured || (blendmode & 1u) != 0u) return polyalpha;
+  return ((((texw >> 16) & 0x1Fu) + 1u) * (polyalpha + 1u) - 1u) >> 5;
 }
-
-// shade_pixel with the texel already fetched (6-bit RGB, 5-bit alpha).
-uint shade_texel(GpuPoly p, uint blendmode, uint polyalpha, bool textured,
-                 int vr9, int vg9, int vb9, uvec4 texel) {
-  uint vr = uint(vr9 >> 3) & 0x3Fu, vg = uint(vg9 >> 3) & 0x3Fu, vb = uint(vb9 >> 3) & 0x3Fu;
-  uint r, g, b, a;
+DS_MP uvec4 shade_texel(DS_MP uint blendmode, DS_MP uint polyalpha, bool textured,
+                          DS_MP int vr9, DS_MP int vg9, DS_MP int vb9, uint texw) {
+  DS_MP uint vr = uint(vr9 >> 3) & 0x3Fu, vg = uint(vg9 >> 3) & 0x3Fu, vb = uint(vb9 >> 3) & 0x3Fu;
+  DS_MP uint r, g, b, a;
   // Mode 2 = toon or highlight (DISP3DCNT bit 1). Toon replaces vertex colour
   // via the 32-entry table; highlight greys to its own red and ADDS the table
   // entry after texture combine (below); `vr` stays untouched for both lookups.
-  bool highlight = (pc.f.dispcnt & 2u) != 0u;
-  if (blendmode == 2u) {
+  // DS_TOON false (a frame without mode-2 polygons) compiles this out:
+  // untaken, it still cost the Malis 3-13% of the frame (B4 of GPU-RENDER-PLAN).
+  if (!DS_TOON) blendmode &= 1u;
+  bool highlight = DS_TOON && (pc.f.dispcnt & 2u) != 0u;
+  if (DS_TOON && blendmode == 2u) {
     if (highlight) { vg = vr; vb = vr; }
     else {
-      uint tc = ps.toon[vr >> 1];
+      DS_MP uint tc = ps.toon[vr >> 1];
       vr = c15_to_18(tc, 0u); vg = c15_to_18(tc, 4u); vb = c15_to_18(tc, 9u);
     }
   }
   if (textured) {
-    uint tr = texel.r, tg = texel.g, tb = texel.b, ta = texel.a;
+    DS_MP uint tcol = texw & 0xFFFFu, ta = (texw >> 16) & 0x1Fu;
+    DS_MP uint tr = c15_to_18(tcol, 0u), tg = c15_to_18(tcol, 4u), tb = c15_to_18(tcol, 9u);
     if ((blendmode & 1u) != 0u) {          // decal
       if (ta == 0u)       { r = vr; g = vg; b = vb; }
       else if (ta == 31u) { r = tr; g = tg; b = tb; }
@@ -108,13 +116,19 @@ uint shade_texel(GpuPoly p, uint blendmode, uint polyalpha, bool textured,
   } else {
     r = vr; g = vg; b = vb; a = polyalpha;
   }
-  if (blendmode == 2u && highlight) {
-    uint tc = ps.toon[vr >> 1];
+  if (DS_TOON && blendmode == 2u && highlight) {
+    DS_MP uint tc = ps.toon[vr >> 1];
     r = min(r + c15_to_18(tc, 0u), 63u);
     g = min(g + c15_to_18(tc, 4u), 63u);
     b = min(b + c15_to_18(tc, 9u), 63u);
   }
-  return r | (g << 8) | (b << 16) | (a << 24);
+  return uvec4(r, g, b, a);
+}
+DS_MP uvec4 shade_pixel(GpuPoly p, DS_MP uint blendmode, DS_MP uint polyalpha, bool textured,
+                          DS_MP int vr9, DS_MP int vg9, DS_MP int vb9, int s, int t) {
+  uint texw = 0u;
+  if (textured) texw = sample_tex(p, s, t);
+  return shade_texel(blendmode, polyalpha, textured, vr9, vg9, vb9, texw);
 }
 
 uint alpha_blend(uint dispcnt, uint src, uint dst, uint alpha) {

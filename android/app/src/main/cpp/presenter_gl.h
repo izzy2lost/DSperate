@@ -24,18 +24,27 @@ namespace ninds {
 
 struct ScreenRect { int x = 0, y = 0, w = 0, h = 0; bool shown = false; };
 
-// One frame's high-resolution 3D data (ds::gpu::Gpu::Hires, copied): engine
-// A's per-pixel compositing words, its per-line record, and the 3D layer at
-// `scale` x. Swapped in and out whole, so no buffer is copied twice.
-struct HiresFrame {
-  bool valid = false;
-  uint32_t scale = 1;
-  std::vector<uint32_t> desc, operand, layer;   // 256x192, 256x192, (256*scale)x(192*scale)
-  std::vector<uint32_t> line;                   // 192
-  // The 3D layer handed over without a copy (layer empty): an RGBA8 buffer
-  // holding the same words. A reference the frame's holder owns.
-  AHardwareBuffer* buffer = nullptr;
+// One frame's high-resolution 3D merge (the core's 3D split, core/gpu/split3d.h),
+// per screen: the split's words (ds::gpu::Gpu::Split3DScreen, copied) and the
+// GPU raster's image of the 3D layer at its scale, an AHardwareBuffer holding
+// the record's words (r, g, b of RGB666, then the 5-bit alpha, a byte each).
+// The screen's own framebuffer is the picture without the 3D layer. Swapped
+// in and out whole, so no buffer is copied twice.
+struct HiresScreen {
+  bool on = false;
+  uint32_t scale = 1;                 // texels a DS pixel in `buffer` (the frame's own scale)
+  bool coords = false;                // `xy` holds where a captured pixel's 3D texel is (split3d XY)
+  bool scrolled = false;              // some line has BG0's X offset (bits 20-28 of its `lines` word)
+  std::vector<uint32_t> words, xy;    // 256x192 each
+  std::vector<uint32_t> lines;        // 192: master brightness m | n << 8, BG0's X offset in bits 20-28
+  AHardwareBuffer* buffer = nullptr;  // a reference the frame's holder owns
   void release_buffer() { if (buffer) { AHardwareBuffer_release(buffer); buffer = nullptr; } }
+};
+struct HiresFrame {
+  HiresScreen s[2];
+  bool any() const { return s[0].on || s[1].on; }
+  void release_buffer() { s[0].release_buffer(); s[1].release_buffer(); }
+  void clear() { for (HiresScreen& h : s) { h.release_buffer(); h.on = false; } }
 };
 
 class Presenter {
@@ -55,30 +64,22 @@ public:
   void set_layout(int display, const ScreenRect& top, const ScreenRect& bottom);
   void set_filter(int filter);
   // Emulator thread: both screens, 256x192 0xAARRGGBB each. With `hires`
-  // (its contents are swapped with the presenter's previous ones), engine
-  // A's screen shows its 3D at the frame's internal resolution.
-  // With `edges` (each screen's edge plane, Gpu::edge_plane, and its rows
-  // with edges, Gpu::edge_rows; null for none), the screen's 3D edges are cut
-  // at panel density (the edge cut, core/gpu/edge_cut.h) whatever the filter.
-  void submit(const uint32_t* top, const uint32_t* bottom, HiresFrame* hires = nullptr,
-              const uint32_t* const* edges = nullptr, const uint64_t* const* edge_rows = nullptr);
-  // The newest frame, top screen above bottom (256x384), for thumbnails.
-  void snapshot(std::vector<uint32_t>& out);
+  // (its contents are swapped with the presenter's previous ones), a split
+  // screen gets its 3D merged in from the raster's image at its scale.
+  void submit(const uint32_t* top, const uint32_t* bottom, HiresFrame* hires = nullptr);
 
 private:
   void run();
   bool make_surface(int display);
   void release_surface(int display);
   bool init_programs();
-  void draw_display(int display, const ScreenRect* rect, int filter, bool xbrz, int hi_screen);
+  void draw_display(int display, const ScreenRect* rect, int filter, bool xbrz, const bool* hi_on);
   void release_all();
   bool init_gl();
   bool init_xbrz();
   bool init_hires();
-  bool init_edges();
   void upload_hires();
   GLuint import_buffer(AHardwareBuffer* b);   // the GL texture sampling `b` (cached)
-  void store_ghost(int screen);
   void drop_imports(bool all);
   void draw();
 
@@ -97,8 +98,6 @@ private:
   std::vector<uint32_t> back_;         // newest submitted frame
   bool fresh_ = false;                 // back_ holds a frame not yet uploaded
   HiresFrame hi_back_;                 // the high-res data that goes with back_
-  std::vector<uint32_t> edge_back_;    // both screens' edge planes with back_ (rows without edges zero)
-  bool edge_back_on_[2] = {};
 
   // Render thread only.
   // One context shared by both displays' surfaces, so every texture serves both.
@@ -115,37 +114,17 @@ private:
   GLuint xbrz_prog_ = 0, xbrz_vbo_ = 0, xbrz_fbo_[2] = {0, 0}, xbrz_tex_[2] = {0, 0};
   GLint xbrz_u_tex_ = -1, xbrz_u_texsize_ = -1, xbrz_u_drawsize_ = -1;
   bool xbrz_failed_ = false, xbrz_stale_[2] = {true, true};
-  // The edge cut: the front frame's edge planes and the program drawing them.
-  std::vector<uint32_t> edge_front_;
-  bool edge_on_[2] = {}, edge_uploaded_ = false, edge_failed_ = false;
-  GLuint edge_prog_ = 0, edge_tex_[2] = {0, 0};
-  GLint edge_u_tex_ = -1, edge_u_edge_ = -1, edge_u_bw_ = -1;
-  // High-res 3D composite: the uploaded frame's data and its program.
+  // The 3D merge: the uploaded frame's data and its program.
   HiresFrame hi_front_;
-  GLuint hi_prog_ = 0, hi_tex_[4] = {0, 0, 0, 0};   // desc, operand, line, layer
-  uint32_t hi_layer_scale_ = 0;                      // the layer texture's allocated scale
-  GLint hi_u_base_ = -1, hi_u_layer_ = -1, hi_u_desc_ = -1, hi_u_oper_ = -1, hi_u_line_ = -1;
-  GLint hi_u_scale_ = -1, hi_u_screen_ = -1, hi_u_mode_ = -1, hi_u_out_ = -1;
+  GLuint hi_prog_ = 0;
+  GLuint hi_words_[2] = {0, 0}, hi_xy_[2] = {0, 0}, hi_lines_[2] = {0, 0};
+  GLuint hi_layer_[2] = {0, 0};                      // each screen's buffer, imported (not owned)
+  GLint hi_u_base_ = -1, hi_u_frame_ = -1, hi_u_layer_ = -1, hi_u_words_ = -1, hi_u_xy_ = -1, hi_u_lines_ = -1;
+  GLint hi_u_scale_ = -1, hi_u_flags_ = -1, hi_u_mode_ = -1, hi_u_out_ = -1;
   bool hi_failed_ = false, hi_uploaded_ = false;
-  GLint hi_u_layer8_ = -1, hi_u_kind_ = -1;
-  GLuint hi_layer8_tex_ = 0;                         // the frame's buffer, imported (not owned)
   struct Imported { AHardwareBuffer* buffer; void* image; GLuint tex; };   // image: EGLImageKHR
   std::vector<Imported> imported_;
   bool import_failed_ = false;
-  // Per screen, the last picture it showed with high-res 3D, kept on the GPU.
-  // A later frame that shows the same picture again (a game displaying a
-  // display capture of it: dual-screen 3D, motion blur) draws its matching
-  // pixels from this instead of at 1x. Expires two frames after it was taken.
-  struct Ghost {
-    bool valid = false;
-    int age = 0;
-    uint32_t scale = 1, layer_scale = 0;
-    int layer_kind = 0;                       // 0 R32UI, 1 RGBA8 (from a buffer)
-    GLuint desc = 0, oper = 0, line = 0, native = 0, layer = 0;
-  };
-  Ghost ghost_[2];
-  GLuint ghost_fbo_[2] = {0, 0};              // read / draw framebuffers for the layer copy
-  GLint hi_u_ghost_ = -1, hi_u_cur_ = -1, hi_u_gnat_ = -1;
 };
 
 } // namespace ninds

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
+#include "core/gpu/gpu_timeline.h"
 #include "core/gpu/gpu3d.h"
 #include "core/div64.h"
 #include "core/host_cores.h"
@@ -213,9 +214,15 @@ void clip_segment(Vertex& out, const Vertex& vin, const Vertex& vout) {
   out.clipped = true;
 }
 
+// A convex polygon of 4 vertices leaves the six planes with at most 10. A quad that is not convex (a bow tie, a
+// dart) can gain a vertex for every second one it has at each of the six half-plane passes: 4, 6, 9, 13, 19, 28,
+// 42. The buffers hold that; what is kept is the first kPolyMax (Polygon::vtx), as before for every polygon that
+// fitted. (Guitar Hero: On Tour sends such a quad when its frame logic runs late; ten wrote past the stack buffer.)
+constexpr int kClipMax = 48, kPolyMax = 10;
+
 template <int comp, bool attribs>
 int clip_against_plane(Vertex* v, int nverts, int clipstart, bool far_clip) {
-  Vertex temp[10];
+  Vertex temp[kClipMax];
   int c = clipstart;
   if (clipstart == 2) { temp[0] = v[0]; temp[1] = v[1]; }
   // Each pass reads one array and writes the other, avoiding a per-vertex copy.
@@ -275,7 +282,7 @@ int clip_polygon(Vertex* v, int nverts, int clipstart, bool far_clip) {
   nverts = clip_against_plane<2, attribs>(v, nverts, clipstart, far_clip);
   nverts = clip_against_plane<1, attribs>(v, nverts, clipstart, far_clip);
   nverts = clip_against_plane<0, attribs>(v, nverts, clipstart, far_clip);
-  return nverts;
+  return std::min(nverts, kPolyMax);
 }
 
 } // namespace
@@ -283,8 +290,7 @@ int clip_polygon(Vertex* v, int nverts, int clipstart, bool far_clip) {
 Gpu3D::~Gpu3D() { renderer_.sync_all(); }
 
 Gpu3D::Gpu3D(NDS& nds) : nds_(nds), renderer_(nds) {
-  if (const char* e = std::getenv("DS_EDGE_DENSITY")) edge_density_ = std::atoi(e);   // the GPU edge cut's clump limit (edge_line)
-  if (const char* e = std::getenv("DS_EDGE_GAP")) edge_gap_ = std::atoi(e) != 0;      // the GPU edge cut's gap fill (edge_line)
+  if (const char* e = std::getenv("DS_GPU_GEOM")) geom_mode_ = !std::strcmp(e, "only") ? GeomMode::Only : GeomMode::Off;   // see geom_mode_
   reset();
 }
 
@@ -329,6 +335,9 @@ void Gpu3D::reset() {
   vertex_num_ = vertex_in_poly_ = consecutive_polys_ = 0;
   last_strip_poly_ = nullptr; num_opaque_ = 0;
   bank_ = 0; render_bank_ = 1; raster_bank_ = 1; pending_bank_ = 1; num_vertices_ = num_polygons_ = 0;
+  renderer_.gpu_prelist_wait();
+  for (GeomStream& g : streams_) { g.begin(clip_); g.gpu_only = false; }
+  geom_skip_ = false;
   swaps_ = 0; list_unconsumed_ = false;
   flush_request_ = flush_attr_ = 0; render_identical_ = false; swapped_ = false; swap_wait_ = false; swap_busy_until_ = 0; list_same_ = false;
   renderer_.reset();
@@ -452,8 +461,15 @@ void Gpu3D::gxfifo_write(u32 value) {
 // A GXFIFO DMA burst: `n` words from one direct-mapped source page. Nothing
 // can observe the log mid-burst (CPU stopped for the DMA); caller keeps `n`
 // under fifo_burst_room() so the log cannot fill.
+namespace {
+// Commands with exactly one parameter.
+struct OneParam { u8 is[256]; constexpr OneParam() : is{} { for (unsigned k = 0; k < 256; ++k) is[k] = CMD_PARAMS[k] == 1; } };
+constexpr OneParam kOneParam;
+}
+
 void Gpu3D::gxfifo_dma_burst(const u8* src, u32 n) {
   if (!geometry_on_) return;
+  static const bool quads = !(std::getenv("DS_GX_QUAD") && std::getenv("DS_GX_QUAD")[0] == '0');
   // The cursors ride in registers for the whole run and are written back once.
   struct BurstSink {
     u8* c; u32* p; u32 cn, pn, inf;
@@ -465,6 +481,21 @@ void Gpu3D::gxfifo_dma_burst(const u8* src, u32 n) {
   } sink{cmd_log_.get(), par_log_.get(), cmd_n_, par_n_, inflight_n_};
   GxParse p = parse_;   // local copy, written back once
   for (u32 i = 0; i < n; ) {
+    // The usual packed word: four commands of one parameter each, and their four parameters behind it (a
+    // display list of texcoord / colour / vertex groups is nothing else). Logged in one step, as the walk below
+    // logs them one word at a time, parser state included (it is saved with a state).
+    if (p.num_cmds == 0 && sink.inf == 0 && n - i >= 5 && quads) {
+      u32 h;
+      std::memcpy(&h, src + i * 4, 4);
+      if (kOneParam.is[h & 0xFF] & kOneParam.is[(h >> 8) & 0xFF] & kOneParam.is[(h >> 16) & 0xFF] & kOneParam.is[h >> 24]) {
+        std::memcpy(sink.c + sink.cn, &h, 4);   // command bytes in the word's order (little-endian hosts)
+        std::memcpy(sink.p + sink.pn, src + i * 4 + 4, 16);
+        sink.cn += 4; sink.pn += 4;
+        p.cur_cmd = 0; p.param_count = 1; p.total_params = 1;
+        i += 5;
+        continue;
+      }
+    }
     // Bulk parameters: copy them in one go, leaving the LAST parameter to go
     // through the walk below so the commit happens exactly where it did before.
     if (p.num_cmds != 0) {
@@ -615,6 +646,8 @@ void Gpu3D::exec_single(u8 cmd, const u32* p) {
   case 0x41: break;   // end: no effect
   case 0x50:   // swap buffers
     flush_attr_ = param & 3;   // finalise_list's sort mode
+    streams_[bank_].swap_attr = flush_attr_;
+    streams_[bank_].serial = ++stream_serial_;
     // Takes effect now: list finalised and bank flipped immediately; render
     // happens at VBlank. swap_wait_ carries the busy bit until then.
     if (rendering_on_) finalise_list();
@@ -622,6 +655,7 @@ void Gpu3D::exec_single(u8 cmd, const u32* p) {
     swap_wait_ = true;
     { std::lock_guard<std::mutex> lk(bank_mu_); render_bank_ = bank_; bank_ = next_write_bank(); }
     num_vertices_ = num_polygons_ = num_opaque_ = 0;
+    if (geom_mode_ != GeomMode::Off) begin_stream();
     break;
   case 0x60:   // viewport (Y is upside down)
     viewport_[0] = param & 0xFF;
@@ -689,6 +723,7 @@ void Gpu3D::update_clip_matrix() {
   clip_dirty_ = false;
   clip_ = proj_;
   mtx_mult_4x4(clip_.data(), pos_.data());
+  if (geom_skip_) streams_[bank_].clip.push_back(clip_);
 }
 
 // Reorder temp_vtx_ so that position i is slot i again (only the state writer
@@ -704,6 +739,7 @@ void Gpu3D::submit_vertex() {
   const s64 v[4] = {cur_vertex_[0], cur_vertex_[1], cur_vertex_[2], 0x1000};
   Vertex& vt = *vptr_[vertex_in_poly_];
   update_clip_matrix();
+  if (!geom_skip_) {   // the raster's vertex stage transforms instead
 #if DSPERATE_NEON
   // The four clip-space coordinates are four dot products against the same
   // vertex: one 4-lane pass, bit-exact with the scalar arm.
@@ -731,11 +767,13 @@ void Gpu3D::submit_vertex() {
   vt.oc = outcode(vt.pos);
 #endif
   for (int c = 0; c < 3; ++c) vt.col[c] = (vertex_color_[c] << 12) + 0xFFF;
+  }
   if ((texparam_ >> 30) == 3) {
     vt.tex[0] = static_cast<s16>(((v[0] * tex_[0] + v[1] * tex_[4] + v[2] * tex_[8]) >> 24) + raw_texcoords_[0]);
     vt.tex[1] = static_cast<s16>(((v[0] * tex_[1] + v[1] * tex_[5] + v[2] * tex_[9]) >> 24) + raw_texcoords_[1]);
   } else { vt.tex[0] = texcoords_[0]; vt.tex[1] = texcoords_[1]; }
   vt.clipped = false;
+  if (geom_skip_) record_vertex(vt);
 
   ++vertex_num_; ++vertex_in_poly_;
   switch (poly_mode_) {
@@ -818,7 +856,175 @@ u8 Gpu3D::outcode(const s32* pos) {
 // writes straight into vertex RAM, the rare one runs the clipper's plane
 // passes over a scratch copy. Strip-reuse must be decided before the reject
 // test, since it decides which vertices the test covers.
+void Gpu3D::begin_stream() {
+  // Only skips the CPU list when the raster will draw the stream; a frame
+  // begun otherwise keeps its list (the GLES raster, the CPU raster).
+  geom_skip_ = geom_mode_ == GeomMode::Only && renderer_.geom_ready();
+  GeomStream& g = streams_[bank_];
+  g.begin(clip_);
+  g.flush_attr = flush_attr_; g.gpu_only = geom_skip_;
+}
+
+void Gpu3D::sort_list(u32 b, u32 npoly, u32 nopaque, bool manual) {
+  if (npoly) {
+    // Opaque polygons first, then translucent; each group stable-sorted by
+    // sort_key unless the flush asked for manual translucent ordering.
+    u32 io = 0, it = nopaque;
+    const Polygon* pr = &pram_[b * PRAM_BANK];
+    auto& rp = render_polys_[b];
+    for (u32 i = 0; i < npoly; ++i) { const Polygon* p = &pr[i]; if (p->translucent) rp[it++] = p; else rp[io++] = p; }
+    std::stable_sort(rp.begin(), rp.begin() + (manual ? nopaque : npoly),
+                     [](const Polygon* a, const Polygon* b) { return a->sort_key < b->sort_key; });
+  }
+  render_count_[b] = npoly;
+}
+
+bool Gpu3D::streams_equal(const GeomStream& a, const GeomStream& b) {
+  auto same = [](const auto& x, const auto& y) { return x.size() == y.size() && (x.empty() || std::memcmp(x.data(), y.data(), x.size() * sizeof(x[0])) == 0); };
+  return a.flush_attr == b.flush_attr && a.swap_attr == b.swap_attr && a.zero_dot_w_limit == b.zero_dot_w_limit &&
+         same(a.polys, b.polys) && same(a.verts, b.verts) && same(a.viewports, b.viewports) && same(a.clip, b.clip);
+}
+
+void Gpu3D::build_list_from_stream(u32 b) {
+  GeomStream& g = streams_[b];
+  // The emission code works on bank_ and the polygon state in force: borrow them.
+  const u32 s_bank = bank_, s_np = num_polygons_, s_nv = num_vertices_, s_no = num_opaque_;
+  const u32 s_attr = cur_polygon_attr_, s_tp = texparam_, s_tpal = texpal_, s_flush = flush_attr_, s_zdw = zero_dot_w_limit_, s_mode = poly_mode_;
+  const std::array<u32, 6> s_vp = viewport_;
+  Polygon* const s_strip = last_strip_poly_;
+  bank_ = b; num_polygons_ = num_vertices_ = num_opaque_ = 0;
+  flush_attr_ = g.flush_attr; zero_dot_w_limit_ = g.zero_dot_w_limit; poly_mode_ = 0;
+  stream_polys_t(*this, g);
+  sort_list(b, num_polygons_, num_opaque_, g.swap_attr & 1);
+  g.gpu_only = false;
+  if (b == s_bank) last_strip_poly_ = nullptr;   // the frame in progress continues on the CPU: keep its counts
+  else { num_polygons_ = s_np; num_vertices_ = s_nv; num_opaque_ = s_no; last_strip_poly_ = s_strip; }
+  bank_ = s_bank;
+  cur_polygon_attr_ = s_attr; texparam_ = s_tp; texpal_ = s_tpal; flush_attr_ = s_flush; zero_dot_w_limit_ = s_zdw; poly_mode_ = s_mode;
+  viewport_ = s_vp;
+}
+
+template <class S> void Gpu3D::stream_polys_t(S& s, const GeomStream& g) {
+  // A strip's polygon takes its first two vertices from the one before, as
+  // the engine's own list does (and the hardware's vertex RAM): told here by
+  // the stream's vertex indices. Without it a strip quad cost four vertices
+  // and the 6144 ran out at 1536 quads, polygons the hardware draws.
+  u32 prev_stream[4] = {}, prev_viewport = 0, prev_n = 0;
+  u16 prev_vram[4] = {};
+  for (const GeomStream::Poly& p : g.polys) {
+    Vertex v[4] = {};
+    const Vertex* src[4];
+    const int n = static_cast<int>(p.nverts);
+    unsigned oc_all = 0x3Fu, oc_any = 0;
+    for (int k = 0; k < n; ++k) {
+      const GeomStream::Vert& gv = g.verts[p.vtx[k]];
+      const std::array<s32, 16>& m = g.clip[gv.mtx];
+      const s64 x = static_cast<s16>(gv.xy & 0xFFFF), y = static_cast<s16>(gv.xy >> 16), z = gv.z;
+      for (int c = 0; c < 4; ++c) v[k].pos[c] = static_cast<s32>((x * m[c] + y * m[4 + c] + z * m[8 + c] + s64{0x1000} * m[12 + c]) >> 12);
+      v[k].oc = outcode(v[k].pos);
+      for (int c = 0; c < 3; ++c) v[k].col[c] = static_cast<s32>(((gv.color >> (8 * c)) & 0x1F) << 12) + 0xFFF;
+      v[k].tex[0] = static_cast<s16>(gv.tex & 0xFFFF); v[k].tex[1] = static_cast<s16>(gv.tex >> 16);
+      src[k] = &v[k];
+      oc_all &= v[k].oc; oc_any |= v[k].oc;
+    }
+    if (oc_all) continue;
+    s.cur_polygon_attr_ = p.attr; s.texparam_ = p.texparam; s.texpal_ = p.texpal; s.viewport_ = g.viewports[p.viewport];
+    // Culling, as submit_polygon.
+    const Vertex &v0 = v[0], &v1 = v[1], &v2 = v[2];
+    s64 nx = static_cast<s64>(v0.pos[1] - v1.pos[1]) * (v2.pos[3] - v1.pos[3]) - static_cast<s64>(v0.pos[3] - v1.pos[3]) * (v2.pos[1] - v1.pos[1]);
+    s64 ny = static_cast<s64>(v0.pos[3] - v1.pos[3]) * (v2.pos[0] - v1.pos[0]) - static_cast<s64>(v0.pos[0] - v1.pos[0]) * (v2.pos[3] - v1.pos[3]);
+    s64 nz = static_cast<s64>(v0.pos[0] - v1.pos[0]) * (v2.pos[1] - v1.pos[1]) - static_cast<s64>(v0.pos[1] - v1.pos[1]) * (v2.pos[0] - v1.pos[0]);
+    while ((((nx >> 31) ^ (nx >> 63)) != 0) || (((ny >> 31) ^ (ny >> 63)) != 0) || (((nz >> 31) ^ (nz >> 63)) != 0)) { nx >>= 4; ny >>= 4; nz >>= 4; }
+    const s64 dot = static_cast<s64>(v1.pos[0]) * nx + static_cast<s64>(v1.pos[1]) * ny + static_cast<s64>(v1.pos[3]) * nz;
+    if ((dot < 0 && !(p.attr & (1 << 7))) || (dot > 0 && !(p.attr & (1 << 6)))) { prev_n = 0; continue; }
+    if (oc_any != 0) { prev_n = 0; emit_clipped_t(s, src, n, 0, nullptr, 0, dot <= 0); continue; }
+    u16 reused[2] = {};
+    int shared = 0;
+    if (prev_n && prev_viewport == p.viewport) {
+      for (; shared < 2; ++shared) {
+        u32 k = 0;
+        while (k < prev_n && prev_stream[k] != p.vtx[shared]) ++k;
+        if (k == prev_n) break;
+        reused[shared] = prev_vram[k];
+      }
+      if (shared < 2) shared = 0;
+      else for (int k = 0; k < 2; ++k) src[k] = &s.cur_vram()[reused[k] - s.vram_base()];
+    }
+    const u32 before = s.num_polygons_;
+    emit_unclipped_t(s, src, n, shared, reused, dot <= 0);
+    prev_n = 0;
+    if (s.num_polygons_ != before) {
+      const Polygon& made = s.cur_pram()[before];
+      prev_n = static_cast<u32>(n); prev_viewport = p.viewport;
+      for (int k = 0; k < n; ++k) { prev_stream[k] = p.vtx[k]; prev_vram[k] = made.vtx[k]; }
+    }
+  }
+}
+
+// The emission's state for a stream's list built off the emulation thread (stream_list): the engine's own
+// fields under their names, so the templates above serve both. It writes the vertex and polygon RAM of the
+// stream's bank, which a frame recorded for the vertex stage leaves empty and nothing else reads until the
+// raster is done with the frame (render_frame waits for it before the bank changes hands).
+struct Gpu3D::StreamEmit {
+  std::vector<Vertex>& vram_; std::vector<Polygon>& pram_;
+  u32 bank_;
+  u32 num_polygons_ = 0, num_vertices_ = 0, num_opaque_ = 0;
+  u32 cur_polygon_attr_ = 0, texparam_ = 0, texpal_ = 0, flush_attr_ = 0, zero_dot_w_limit_ = 0xFFFFFF, poly_mode_ = 0;
+  u32 dispcnt_ = 0;   // the RAM overflow flag: the game's own came from the counts as it sent the frame
+  std::array<u32, 6> viewport_{};
+  Polygon* last_strip_poly_ = nullptr;
+  Vertex* cur_vram() { return &vram_[bank_ * VRAM_BANK]; }
+  Polygon* cur_pram() { return &pram_[bank_ * PRAM_BANK]; }
+  u32 vram_base() const { return bank_ * VRAM_BANK; }
+};
+
+// The raster bank's stream as a polygon list in the raster's order (sort_list's), built here and now: any
+// thread, while the emulation goes on with the next frame in another bank. The stream stays the frame's
+// record (gpu_only), so a save state or a refusal still builds the list its own way.
+u32 Gpu3D::stream_list(u32 b, std::vector<const Polygon*>& out) {
+  const GeomStream& g = streams_[b];
+  StreamEmit e{vram_, pram_, b};
+  e.flush_attr_ = g.flush_attr; e.zero_dot_w_limit_ = g.zero_dot_w_limit;
+  stream_polys_t(e, g);
+  const u32 npoly = e.num_polygons_, nopaque = e.num_opaque_;
+  out.resize(npoly);
+  u32 io = 0, it = nopaque;
+  const Polygon* pr = &pram_[b * PRAM_BANK];
+  for (u32 i = 0; i < npoly; ++i) { const Polygon* p = &pr[i]; if (p->translucent) out[it++] = p; else out[io++] = p; }
+  std::stable_sort(out.begin(), out.begin() + ((g.swap_attr & 1) ? nopaque : npoly), [](const Polygon* a, const Polygon* c) { return a->sort_key < c->sort_key; });
+  return npoly;
+}
+
+void Gpu3D::record_vertex(const Vertex& vt) {
+  GeomStream& g = streams_[bank_];
+  g.slot_vert[&vt - temp_vtx_] = static_cast<u32>(g.verts.size());
+  GeomStream::Vert r;
+  r.xy = static_cast<u16>(cur_vertex_[0]) | (static_cast<u32>(static_cast<u16>(cur_vertex_[1])) << 16);
+  r.z = cur_vertex_[2];
+  r.mtx = static_cast<u32>(g.clip.size() - 1);
+  r.color = u32{vertex_color_[0]} | (u32{vertex_color_[1]} << 8) | (u32{vertex_color_[2]} << 16);
+  r.tex = static_cast<u16>(vt.tex[0]) | (static_cast<u32>(static_cast<u16>(vt.tex[1])) << 16);
+  g.verts.push_back(r);
+}
+
+// The polygon from the vertices vptr_ names now (strip order applied).
+void Gpu3D::record_polygon() {
+  GeomStream& g = streams_[bank_];
+  // Compared in line: this runs per polygon, and the array's own != is a library call.
+  bool vp_new = g.viewports.empty();
+  if (!vp_new) { const u32* const l = g.viewports.back().data(); u32 d = 0; for (int i = 0; i < 6; ++i) d |= l[i] ^ viewport_[i]; vp_new = d != 0; }
+  if (vp_new) g.viewports.push_back(viewport_);
+  GeomStream::Poly r{};
+  r.nverts = (poly_mode_ & 1) ? 4 : 3;
+  for (u32 i = 0; i < r.nverts; ++i) r.vtx[i] = g.slot_vert[vptr_[i] - temp_vtx_];
+  r.attr = cur_polygon_attr_; r.texparam = texparam_; r.texpal = texpal_;
+  r.viewport = static_cast<u32>(g.viewports.size() - 1);
+  g.polys.push_back(r);
+  g.zero_dot_w_limit = zero_dot_w_limit_;
+}
+
 void Gpu3D::submit_polygon() {
+  if (geom_skip_) { record_polygon(); return; }
   const Vertex* src[4];
   u16 reused_idx[2] = {0, 0};
   int clipstart = 0, lastpolyverts = 0;
@@ -864,118 +1070,27 @@ void Gpu3D::submit_polygon() {
 
 // A polygon accepted whole: new vertices write directly to vertex RAM slots,
 // which stay beyond num_vertices_ until the zero-dot test passes.
-void Gpu3D::emit_polygon_unclipped(const Vertex* const* src, int nverts, int clipstart, const u16* reused_idx, bool facing) {
-  if (num_polygons_ >= PRAM_BANK || num_vertices_ + nverts > VRAM_BANK) {
-    last_strip_poly_ = nullptr;
-    dispcnt_ |= (1 << 13);                     // RAM overflow flag
-    return;
-  }
-  Vertex* vr = cur_vram();
-  Vertex* fresh = vr + num_vertices_;
-  const Vertex* vv[4];
-  for (int i = 0; i < clipstart; ++i) vv[i] = src[i];
-  for (int i = clipstart; i < nverts; ++i) {
-    Vertex& vt = fresh[i - clipstart];
-    vt = *src[i];
-    // Colours keep only their 5-bit integer part across the clip stage.
-    for (int k = 0; k < 3; ++k) { vt.col[k] &= ~0xFFF; vt.col[k] += 0xFFF; }
-    viewport_vertex(vt, viewport_);
-    vv[i] = &vt;
-  }
-
-  // Zero-dot polygons (all vertices on one pixel) beyond the W limit are dropped.
-  if (!(cur_polygon_attr_ & (1 << 13))) {
-    bool zerodot = true, allbehind = true;
-    for (int i = 0; i < nverts; ++i) {
-      if (vv[i]->sx != vv[0]->sx || vv[i]->sy != vv[0]->sy) { zerodot = false; break; }
-      if (static_cast<u32>(vv[i]->pos[3]) <= zero_dot_w_limit_) { allbehind = false; break; }
-    }
-    if (zerodot && allbehind) { last_strip_poly_ = nullptr; return; }
-  }
-
-
-  Polygon* poly = new_polygon(facing);
-  for (int i = 0; i < clipstart; ++i) poly->vtx[i] = reused_idx[i];
-  for (int i = clipstart; i < nverts; ++i) {
-    final_colour(fresh[i - clipstart]);
-    poly->vtx[i] = static_cast<u16>(vram_base() + num_vertices_++);
-  }
-  poly->nverts = static_cast<u32>(nverts);
-  finish_polygon(poly, nverts);
-}
-
-// A polygon that crosses the frustum: plane passes run over a scratch copy,
-// which may change the vertex count and so whether reused strip vertices can
-// still be shared by index.
-void Gpu3D::emit_polygon_clipped(const Vertex* const* src, int nverts, int clipstart, const u16* reused_idx, int lastpolyverts, bool facing) {
-  Vertex clipped[10];
-  for (int i = 0; i < nverts; ++i) clipped[i] = *src[i];
-
-  nverts = clip_polygon<true>(clipped, nverts, clipstart, cur_polygon_attr_ & (1 << 12));
-  if (nverts == 0) { last_strip_poly_ = nullptr; return; }
-
-  if (num_polygons_ >= PRAM_BANK || num_vertices_ + nverts > VRAM_BANK) {
-    last_strip_poly_ = nullptr;
-    dispcnt_ |= (1 << 13);                     // RAM overflow flag
-    return;
-  }
-
-  for (int i = clipstart; i < nverts; ++i) viewport_vertex(clipped[i], viewport_);
-
-  // Zero-dot polygons (all vertices on one pixel) beyond the W limit are dropped.
-  if (!(cur_polygon_attr_ & (1 << 13))) {
-    bool zerodot = true, allbehind = true;
-    for (int i = 0; i < nverts; ++i) {
-      if (clipped[i].sx != clipped[0].sx || clipped[i].sy != clipped[0].sy) { zerodot = false; break; }
-      if (static_cast<u32>(clipped[i].pos[3]) <= zero_dot_w_limit_) { allbehind = false; break; }
-    }
-    if (zerodot && allbehind) { last_strip_poly_ = nullptr; return; }
-  }
-
-
-  Polygon* poly = new_polygon(facing);
-  Vertex* vr = cur_vram();
-  if (clipstart > 0) {
-    if (nverts == lastpolyverts) { poly->vtx[0] = reused_idx[0]; poly->vtx[1] = reused_idx[1]; }
-    else {
-      vr[num_vertices_] = *src[0]; poly->vtx[0] = static_cast<u16>(vram_base() + num_vertices_);
-      vr[num_vertices_ + 1] = *src[1]; poly->vtx[1] = static_cast<u16>(vram_base() + num_vertices_ + 1);
-      num_vertices_ += 2;
-    }
-    poly->nverts += 2;
-  }
-  for (int i = clipstart; i < nverts; ++i) {
-    Vertex& vt = vr[num_vertices_];
-    vt = clipped[i];
-    poly->vtx[i] = static_cast<u16>(vram_base() + num_vertices_);
-    ++num_vertices_; ++poly->nverts;
-    final_colour(vt);
-  }
-  finish_polygon(poly, nverts);
-}
-
-// Allocate the next polygon RAM entry and fill the attributes that do not
-// depend on its vertices.
-Polygon* Gpu3D::new_polygon(bool facing) {
-  Polygon* poly = &cur_pram()[num_polygons_++];
+// The emission below as templates over the state it works on: the engine itself, or the copy a stream's list is
+// built from on another thread (StreamEmit). For the engine the code is what it was.
+template <class S> Polygon* Gpu3D::new_polygon_t(S& s, bool facing) {
+  Polygon* poly = &s.cur_pram()[s.num_polygons_++];
   poly->nverts = 0;
-  poly->attr = cur_polygon_attr_; poly->texparam = texparam_; poly->texpal = texpal_;
+  poly->attr = s.cur_polygon_attr_; poly->texparam = s.texparam_; poly->texpal = s.texpal_;
   poly->degenerate = false;
   poly->facing = facing;
-  const u32 texfmt = (texparam_ >> 26) & 7, polyalpha = (cur_polygon_attr_ >> 16) & 0x1F;
+  const u32 texfmt = (s.texparam_ >> 26) & 7, polyalpha = (s.cur_polygon_attr_ >> 16) & 0x1F;
   poly->translucent = (texfmt == 1 || texfmt == 6) || (polyalpha > 0 && polyalpha < 31);
-  poly->shadow_mask = (cur_polygon_attr_ & 0x3F000030) == 0x00000030;
-  poly->shadow = ((cur_polygon_attr_ & 0x30) == 0x30) && !poly->shadow_mask;
-  if (!poly->translucent) ++num_opaque_;
+  poly->shadow_mask = (s.cur_polygon_attr_ & 0x3F000030) == 0x00000030;
+  poly->shadow = ((s.cur_polygon_attr_ & 0x30) == 0x30) && !poly->shadow_mask;
+  if (!poly->translucent) ++s.num_opaque_;
   return poly;
 }
 
-// Bounds, sort key and per-vertex depth from the polygon's vertex RAM entries.
-void Gpu3D::finish_polygon(Polygon* poly, int nverts) {
+template <class S> void Gpu3D::finish_polygon_t(S& s, Polygon* poly, int nverts) {
   // Bounds, and the W range used to normalise W to 16 bits.
   u32 vtop = 0, vbot = 0; s32 ytop = 192, ybot = 0, xtop = 256, xbot = 0; u32 wsize = 0;
   for (int i = 0; i < nverts; ++i) {
-    const Vertex& vt = vram_[poly->vtx[i]];
+    const Vertex& vt = s.vram_[poly->vtx[i]];
     if (vt.sy < ytop) { xtop = vt.sx; ytop = vt.sy; vtop = i; }
     if (vt.sy > ybot || (vt.sy == ybot && vt.sx > xbot)) { xbot = vt.sx; ybot = vt.sy; vbot = i; }
     const u32 w = static_cast<u32>(vt.pos[3]);
@@ -987,22 +1102,123 @@ void Gpu3D::finish_polygon(Polygon* poly, int nverts) {
   if (ybot > 192) poly->degenerate = true;
   poly->sort_key = (ybot << 8) | ytop;
   if (poly->translucent) poly->sort_key |= 0x10000;
-  poly->wbuffer = flush_attr_ & 2;
+  poly->wbuffer = s.flush_attr_ & 2;
 
   for (int i = 0; i < nverts; ++i) {
-    const Vertex& vt = vram_[poly->vtx[i]];
+    const Vertex& vt = s.vram_[poly->vtx[i]];
     s32 w, wshifted;
     if (wsize < 16) { w = vt.pos[3] << (16 - wsize); wshifted = w >> (16 - wsize); }
     else { w = vt.pos[3] >> (wsize - 16); wshifted = w << (wsize - 16); }
     s32 z;
-    if (flush_attr_ & 2) z = wshifted;
+    if (s.flush_attr_ & 2) z = wshifted;
     else if (vt.pos[3]) z = static_cast<s32>((div_s64(static_cast<s64>(vt.pos[2]) * 0x4000, vt.pos[3]) + 0x3FFF) * 0x200);
     else z = 0x7FFE00;
     if (z < 0) z = 0; else if (z > 0xFFFFFF) z = 0xFFFFFF;
     poly->z[i] = z; poly->w[i] = w;
   }
-  last_strip_poly_ = poly_mode_ >= 2 ? poly : nullptr;
+  s.last_strip_poly_ = s.poly_mode_ >= 2 ? poly : nullptr;
 }
+
+template <class S> void Gpu3D::emit_unclipped_t(S& s, const Vertex* const* src, int nverts, int clipstart, const u16* reused_idx, bool facing) {
+  if (s.num_polygons_ >= PRAM_BANK || s.num_vertices_ + nverts > VRAM_BANK) {
+    s.last_strip_poly_ = nullptr;
+    s.dispcnt_ |= (1 << 13);                     // RAM overflow flag
+    return;
+  }
+  Vertex* vr = s.cur_vram();
+  Vertex* fresh = vr + s.num_vertices_;
+  const Vertex* vv[4];
+  for (int i = 0; i < clipstart; ++i) vv[i] = src[i];
+  for (int i = clipstart; i < nverts; ++i) {
+    Vertex& vt = fresh[i - clipstart];
+    vt = *src[i];
+    // Colours keep only their 5-bit integer part across the clip stage.
+    for (int k = 0; k < 3; ++k) { vt.col[k] &= ~0xFFF; vt.col[k] += 0xFFF; }
+    viewport_vertex(vt, s.viewport_);
+    vv[i] = &vt;
+  }
+
+  // Zero-dot polygons (all vertices on one pixel) beyond the W limit are dropped.
+  if (!(s.cur_polygon_attr_ & (1 << 13))) {
+    bool zerodot = true, allbehind = true;
+    for (int i = 0; i < nverts; ++i) {
+      if (vv[i]->sx != vv[0]->sx || vv[i]->sy != vv[0]->sy) { zerodot = false; break; }
+      if (static_cast<u32>(vv[i]->pos[3]) <= s.zero_dot_w_limit_) { allbehind = false; break; }
+    }
+    if (zerodot && allbehind) { s.last_strip_poly_ = nullptr; return; }
+  }
+
+
+  Polygon* poly = new_polygon_t(s, facing);
+  for (int i = 0; i < clipstart; ++i) poly->vtx[i] = reused_idx[i];
+  for (int i = clipstart; i < nverts; ++i) {
+    final_colour(fresh[i - clipstart]);
+    poly->vtx[i] = static_cast<u16>(s.vram_base() + s.num_vertices_++);
+  }
+  poly->nverts = static_cast<u32>(nverts);
+  finish_polygon_t(s, poly, nverts);
+}
+
+template <class S> void Gpu3D::emit_clipped_t(S& s, const Vertex* const* src, int nverts, int clipstart, const u16* reused_idx, int lastpolyverts, bool facing) {
+  Vertex clipped[kClipMax];
+  for (int i = 0; i < nverts; ++i) clipped[i] = *src[i];
+
+  nverts = clip_polygon<true>(clipped, nverts, clipstart, s.cur_polygon_attr_ & (1 << 12));
+  if (nverts == 0) { s.last_strip_poly_ = nullptr; return; }
+
+  if (s.num_polygons_ >= PRAM_BANK || s.num_vertices_ + nverts > VRAM_BANK) {
+    s.last_strip_poly_ = nullptr;
+    s.dispcnt_ |= (1 << 13);                     // RAM overflow flag
+    return;
+  }
+
+  for (int i = clipstart; i < nverts; ++i) viewport_vertex(clipped[i], s.viewport_);
+
+  // Zero-dot polygons (all vertices on one pixel) beyond the W limit are dropped.
+  if (!(s.cur_polygon_attr_ & (1 << 13))) {
+    bool zerodot = true, allbehind = true;
+    for (int i = 0; i < nverts; ++i) {
+      if (clipped[i].sx != clipped[0].sx || clipped[i].sy != clipped[0].sy) { zerodot = false; break; }
+      if (static_cast<u32>(clipped[i].pos[3]) <= s.zero_dot_w_limit_) { allbehind = false; break; }
+    }
+    if (zerodot && allbehind) { s.last_strip_poly_ = nullptr; return; }
+  }
+
+
+  Polygon* poly = new_polygon_t(s, facing);
+  Vertex* vr = s.cur_vram();
+  if (clipstart > 0) {
+    if (nverts == lastpolyverts) { poly->vtx[0] = reused_idx[0]; poly->vtx[1] = reused_idx[1]; }
+    else {
+      vr[s.num_vertices_] = *src[0]; poly->vtx[0] = static_cast<u16>(s.vram_base() + s.num_vertices_);
+      vr[s.num_vertices_ + 1] = *src[1]; poly->vtx[1] = static_cast<u16>(s.vram_base() + s.num_vertices_ + 1);
+      s.num_vertices_ += 2;
+    }
+    poly->nverts += 2;
+  }
+  for (int i = clipstart; i < nverts; ++i) {
+    Vertex& vt = vr[s.num_vertices_];
+    vt = clipped[i];
+    poly->vtx[i] = static_cast<u16>(s.vram_base() + s.num_vertices_);
+    ++s.num_vertices_; ++poly->nverts;
+    final_colour(vt);
+  }
+  finish_polygon_t(s, poly, nverts);
+}
+
+void Gpu3D::emit_polygon_unclipped(const Vertex* const* src, int nverts, int clipstart, const u16* reused_idx, bool facing) { emit_unclipped_t(*this, src, nverts, clipstart, reused_idx, facing); }
+
+// A polygon that crosses the frustum: plane passes run over a scratch copy,
+// which may change the vertex count and so whether reused strip vertices can
+// still be shared by index.
+void Gpu3D::emit_polygon_clipped(const Vertex* const* src, int nverts, int clipstart, const u16* reused_idx, int lastpolyverts, bool facing) { emit_clipped_t(*this, src, nverts, clipstart, reused_idx, lastpolyverts, facing); }
+
+// Allocate the next polygon RAM entry and fill the attributes that do not
+// depend on its vertices.
+Polygon* Gpu3D::new_polygon(bool facing) { return new_polygon_t(*this, facing); }
+
+// Bounds, sort key and per-vertex depth from the polygon's vertex RAM entries.
+void Gpu3D::finish_polygon(Polygon* poly, int nverts) { finish_polygon_t(*this, poly, nverts); }
 
 void Gpu3D::calculate_lighting() {
   if ((texparam_ >> 30) == 2) {
@@ -1060,7 +1276,7 @@ void Gpu3D::box_test(const u32* params) {
   }
   static const int faces[6][4] = {{0, 1, 2, 3}, {4, 5, 6, 7}, {0, 3, 4, 5}, {1, 2, 7, 6}, {0, 1, 6, 5}, {2, 3, 4, 7}};
   for (const auto& f : faces) {
-    Vertex face[10];
+    Vertex face[kClipMax];
     for (int i = 0; i < 4; ++i) face[i] = cube[f[i]];
     if (clip_polygon<false>(face, 4, 0, cur_polygon_attr_ & (1 << 12)) > 0) { box_result_ = 1u << 1; return; }
   }
@@ -1084,17 +1300,8 @@ void Gpu3D::vec_test(u32 param) {
 // ---- frame --------------------------------------------------------------------
 
 void Gpu3D::finalise_list() {
-    if (num_polygons_) {
-      // Opaque polygons first, then translucent; each group stable-sorted by
-      // sort_key unless the flush asked for manual translucent ordering.
-      u32 io = 0, it = num_opaque_;
-      const Polygon* pr = cur_pram();
-      auto& rp = render_polys_[bank_];
-      for (u32 i = 0; i < num_polygons_; ++i) { const Polygon* p = &pr[i]; if (p->translucent) rp[it++] = p; else rp[io++] = p; }
-      std::stable_sort(rp.begin(), rp.begin() + ((flush_attr_ & 1) ? num_opaque_ : num_polygons_),
-                       [](const Polygon* a, const Polygon* b) { return a->sort_key < b->sort_key; });
-    }
-    render_count_[bank_] = num_polygons_;
+    tl::ev("J_swap", nds_.gpu.line());
+    sort_list(bank_, num_polygons_, num_opaque_, flush_attr_ & 1);
     ++swaps_;
     if (prof::enabled && list_unconsumed_) prof::add(prof::C_GX_LIST_DROPPED, 1);
     list_unconsumed_ = true;
@@ -1104,6 +1311,8 @@ void Gpu3D::finalise_list() {
       && num_polygons_ == prev_swap_polys_ && num_vertices_ == prev_swap_verts_
       && lists_equal(&pram_[bank_ * PRAM_BANK], &pram_[render_bank_ * PRAM_BANK], num_polygons_,
                      bank_ * VRAM_BANK, render_bank_ * VRAM_BANK, vram_.data());
+    // A stream frame has no list: its stream against the last frame's instead.
+    if (streams_[bank_].gpu_only) list_same_ = rendered_before_ && streams_[render_bank_].gpu_only && streams_equal(streams_[bank_], streams_[render_bank_]);
     prev_swap_polys_ = num_polygons_; prev_swap_verts_ = num_vertices_; rendered_before_ = true;
     if (prof::enabled && list_same_) prof::add(prof::C_GX_LIST_SAME, 1);
     if (prof::enabled) {
@@ -1175,6 +1384,11 @@ void Gpu3D::vblank() {
     // describe, so it must not count as identical.
     if (render_stale_) render_identical_ = false;
     rstate_.dispcnt = dispcnt_;
+    // DS_R3D_DISPCNT_AND=hex (debug): the rasters see DISP3DCNT with bits cleared, to tell
+    // what a difference between them comes from (1 textures, 8 blending, 0x20 edge marking,
+    // 0x80 fog). A repeated frame then never counts as identical, which only costs time.
+    static const u32 disp_and = [] { const char* e = std::getenv("DS_R3D_DISPCNT_AND"); return e ? static_cast<u32>(std::strtoul(e, nullptr, 16)) : ~0u; }();
+    rstate_.dispcnt &= disp_and;
     rstate_.alpha_ref = alpha_ref_;
     rstate_.edge = edge_; rstate_.toon = toon_;
     rstate_.fog_color = fog_color_;
@@ -1185,6 +1399,8 @@ void Gpu3D::vblank() {
     rstate_.fog_density[33] = fog_density_[31];
     rstate_.clear_attr1 = clear_attr1_; rstate_.clear_attr2 = clear_attr2_;
   }
+  // The new frame's list on the submit thread from now, not from the render at line 215 (its textures are read then).
+  if (swapped_ && rendering_on_ && streams_[render_bank_].gpu_only) renderer_.gpu_stream_prelist(*this, render_bank_);
   swapped_ = false;
   if (swap_wait_) { swap_busy_until_ = nds_.sched.now() + 650; swap_wait_ = false; }
   // No lock strictly needed here, but taken anyway so every write to a bank
@@ -1200,6 +1416,9 @@ void Gpu3D::render_frame() {
   { std::lock_guard<std::mutex> lk(bank_mu_); raster_bank_ = pending_bank_; }
   render_stale_ = false;
   renderer_.render(*this);
+  // A stream frame the GPU raster refused (rear-plane bitmap, the raster gone,
+  // a driver error): its list built on the CPU and the frame drawn from that.
+  if (renderer_.take_geom_refused()) { renderer_.gpu_prelist_wait(); build_list_from_stream(raster_bank_); renderer_.render(*this); }
 }
 
 void Gpu3D::set_render_xpos(u16 value, u16 mask) {
@@ -1212,7 +1431,7 @@ void Gpu3D::sync_raster() { renderer_.sync_all(); }
 const u32* Gpu3D::line(const Renderer3D::FrameRef& f, u32 y) {
   renderer_.sync_line(f, static_cast<s32>(y));
   const u32* raw = f.line(y);
-  const u32 xpos = render_xpos_;
+  const u32 xpos = layer_xpos(y);
   if (xpos == 0) return raw;
   u32* const scrolled = scrolled_;
   if (xpos & 0x100) {
@@ -1258,7 +1477,16 @@ u32 Gpu3D::read(u32 addr, u32 width) {
   switch (r) {
   case 0x60: return dispcnt_;
   case 0x320: return 46;                         // RDLINES_COUNT: rendering keeps up
-  case 0x604: return num_polygons_ | (num_vertices_ << 16);
+  case 0x604:
+    // RAM_COUNT is the list being built: how many polygons and vertices the frame has so far. A stream frame has
+    // no counts on this thread (culling and clipping, which decide them, run on the raster's submit thread a
+    // frame later), and reads none. Phantom Hourglass, Spirit Tracks and Golden Sun: Dark Dawn poll it every
+    // frame to see how much room is left, and draw the same picture with 0 as with the true counts
+    // (DS_GPU_GEOM=off). Do not hand out the last swapped frame's counts in its place: tried 2026-11-19, and
+    // the first two took a full frame's count at the start of the next for full RAM and drew next to nothing.
+    // A game whose scene really overflows the RAM gets the hardware's own overflow, not its own trimming.
+    if (geom_skip_) return 0;
+    return num_polygons_ | (num_vertices_ << 16);
   case 0x620: return static_cast<u32>(pos_test_[0]);
   case 0x624: return static_cast<u32>(pos_test_[1]);
   case 0x628: return static_cast<u32>(pos_test_[2]);
@@ -1373,7 +1601,11 @@ void Gpu3D::write(u32 addr, u32 width, u32 value) {
 namespace {
 template <class S> void sync_vertex(S& s, Vertex& v) {
   s.fields(v.pos, v.col, v.tex, v.clipped, v.sx, v.sy, v.fcol);
-  if constexpr (S::reading) { v.fx = v.sx << 4; v.fy = v.sy << 4; }   // a loaded frame's vertices draw on whole pixels
+  if constexpr (S::reading) {
+    v.sx &= 0x1FF; v.sy &= 0xFF;                                    // what viewport_vertex leaves
+    for (s32& c : v.fcol) c &= 0x1FF;                               // 9-bit colour: the toon table is indexed by it
+    v.fx = v.sx << 4; v.fy = v.sy << 4;   // a loaded frame's vertices draw on whole pixels
+  }
 }
 template <class S> void sync_polygon(S& s, Polygon& p) {
   s.fields(p.vtx, p.nverts, p.z, p.w, p.wbuffer, p.attr, p.texparam, p.texpal, p.degenerate, p.facing, p.translucent, p.shadow_mask, p.shadow,
@@ -1382,7 +1614,14 @@ template <class S> void sync_polygon(S& s, Polygon& p) {
 } // namespace
 
 template <class S> void Gpu3D::sync_state(S& s) {
+  renderer_.gpu_prelist_wait();   // a list being built ahead writes a bank's RAM
   if constexpr (!S::reading) drain_all();   // the log does not travel; it is replayed out first
+  // Stream frames have no polygon list: a state stores lists, so they are
+  // built here, and the frame in progress goes on the CPU way.
+  if constexpr (!S::reading) {
+    if (streams_[render_bank_].gpu_only) build_list_from_stream(render_bank_);
+    if (streams_[bank_].gpu_only) { build_list_from_stream(bank_); geom_skip_ = false; }
+  }
   // On disk the overflow flag is GXSTAT bit 15 and the box result bit 1.
   if constexpr (!S::reading) gxstat_ |= stack_err_ | box_result_;
   s.begin("GX3D");
@@ -1401,6 +1640,11 @@ template <class S> void Gpu3D::sync_state(S& s) {
            poly_mode_, cur_vertex_, vertex_color_, texcoords_, raw_texcoords_, normal_, light_dir_, spec_recip_, light_color_,
            mat_diffuse_, mat_ambient_, mat_specular_, mat_emission_, use_shininess_, shininess_,
            polygon_attr_, cur_polygon_attr_, texparam_, texpal_, pos_test_, vec_test_);
+  if constexpr (S::reading) {
+    // The packed-command walk adds a parameter for each word until total_params; the log holds 32 and the table's most is 32.
+    if (parse_.num_cmds > 4 || (parse_.num_cmds && (parse_.total_params > 32 || parse_.param_count >= parse_.total_params))) { s.fail("gx command parser"); return; }
+    rstate_.fog_shift &= 0xF;   // a shift count (DISP3DCNT bits 8-11)
+  }
   // temp_vtx_ travels in position order, so the slot permutation never reaches
   // the file.
   if constexpr (S::reading) reset_vptr();
@@ -1418,6 +1662,11 @@ template <class S> void Gpu3D::sync_state(S& s) {
   s.fields(vertex_num_, vertex_in_poly_, consecutive_polys_, num_opaque_, bank_disk, num_vertices_, num_polygons_,
            rcount, render_identical_, flush_request_, flush_attr_, prev_swap_polys_, prev_swap_verts_, rendered_before_);
   if constexpr (S::reading) { bank_ = bank_disk & 1; render_bank_ = bank_ ^ 1; raster_bank_ = pending_bank_ = render_bank_; }
+  if constexpr (S::reading) {
+    // The next vertex lands in vptr_[vertex_in_poly_]: a position the mode would already have turned into a polygon is out.
+    if (poly_mode_ > 3 || vertex_in_poly_ >= ((poly_mode_ & 1) ? 4u : 3u)) { s.fail("vertex position"); return; }
+    if (num_vertices_ > VRAM_BANK || num_polygons_ > PRAM_BANK || num_opaque_ > num_polygons_) { s.fail("polygon counts"); return; }   // sort_list and the emitters index with them
+  }
   const Polygon** rlist = render_polys_[render_bank_].data();
   // Pointers into polygon RAM travel as indices.
   s32 strip = last_strip_poly_ ? static_cast<s32>(remap(static_cast<u32>(last_strip_poly_ - pram_.data()), PRAM_BANK)) : -1;
@@ -1448,17 +1697,32 @@ template <class S> void Gpu3D::sync_state(S& s) {
     if constexpr (S::reading) { if (nv[slot] > VRAM_BANK || np[slot] > PRAM_BANK) { s.fail("polygon RAM counts"); return; } }
     for (u32 i = 0; i < nv[slot]; ++i) sync_vertex(s, vram_[b * VRAM_BANK + i]);
     for (u32 i = 0; i < np[slot]; ++i) {
-      if constexpr (S::reading) sync_polygon(s, pram_[b * PRAM_BANK + i]);
-      else { Polygon copy = pram_[b * PRAM_BANK + i]; for (u32 j = 0; j < 10; ++j) copy.vtx[j] = static_cast<u16>(remap(copy.vtx[j], VRAM_BANK)); sync_polygon(s, copy); }
+      if constexpr (S::reading) {
+        Polygon& p = pram_[b * PRAM_BANK + i];
+        sync_polygon(s, p);
+        for (u16& vi : p.vtx) if (vi >= VRAM_BANK * 2) vi = 0;   // the two saved slots of vertex RAM
+        // A drawn polygon's edge walk steps vtx[] by nverts and stops at vbot.
+        if (p.nverts > 10 || (!p.degenerate && (p.nverts == 0 || p.vtop >= p.nverts || p.vbot >= p.nverts))) { s.fail("polygon"); return; }
+      }
+      else { Polygon copy = pram_[b * PRAM_BANK + i]; for (u32 j = 0; j < 10; ++j) copy.vtx[j] = j < copy.nverts ? static_cast<u16>(remap(copy.vtx[j], VRAM_BANK)) : u16{0}; sync_polygon(s, copy); }   // the slots past nverts hold whatever the record's last user left (often the unsaved bank's): written as 0, so a state saved, loaded and saved again is the same bytes
     }
   }
   // GXSTAT's busy flag must follow the restored scheduler timeline, not
   // the later session we are replacing. Older states omit these fields.
   if constexpr (S::reading) { swap_wait_ = false; swap_busy_until_ = 0; }
   s.fields(swap_wait_, swap_busy_until_);
+  // A list swapped in since the last VBlank, and whether it equals the one
+  // before: the VBlank after the load decides from them whether the picture
+  // can be kept. An older state has neither and gets a fresh render.
+  if constexpr (S::reading) { swapped_ = true; list_same_ = false; }
+  s.fields(swapped_, list_same_);
   s.end();
   renderer_.sync_output(s);
   stack_err_ = gxstat_ & 0x8000u; box_result_ = gxstat_ & 2u; gxstat_ &= ~0x8002u;
+  if constexpr (S::reading) {   // the loaded frame is a CPU-list frame; streams start at the next swap
+    geom_skip_ = false;
+    for (GeomStream& g : streams_) { g.begin(clip_); g.gpu_only = false; }
+  }
 }
 template void Gpu3D::sync_state<state::Writer>(state::Writer&);
 template void Gpu3D::sync_state<state::Reader>(state::Reader&);

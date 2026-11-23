@@ -399,6 +399,11 @@ u32 Dma::run_channel_impl(Channel& c, u32 budget) {
     c.iter_count--; c.rem_count--;
   }
   if (loops) prof::add(prof::C_DMA_LOOP, loops);
+  // A whole block moved between VRAM and main RAM: a captured image on its way (Gpu::dma_copied).
+  if (a9 && !c.iter_count && c.src_inc == 1 && c.dst_inc == 1 && ((c.cur_src ^ c.cur_dst) >> 26) == 1 && nds_.gpu.cap_follows()) {
+    const u32 units = (c.cnt & 0x1FFFFF) ? (c.cnt & 0x1FFFFF) : 0x200000, bytes = units << (word ? 2 : 1);
+    nds_.gpu.dma_copied(c.cur_src - bytes, c.cur_dst - bytes, bytes);
+  }
   if (c.rem_count) {
     if (c.iter_count == 0) {
       set_running(c, 0);   // wait for the next trigger
@@ -445,6 +450,8 @@ template <class S> void Dma::sync_state(S& s) {
     if constexpr (S::reading) {
       c.burst_table = bt == 1 ? READ16.data : bt == 2 ? READ32.data : bt == 3 ? READ32_N2.data : MRAM_DUMMY.data;
       c.tim_key_src = c.tim_key_dst = ~0u;   // timing cache: refilled on the next access
+      const Burst* bm = burst_meta(c.burst_table);
+      if (c.burst_pos > (bm ? bm->len : 255u)) c.burst_pos = 0;   // an index into the 256-entry table and its prefix sums
     }
   }
   s.end();

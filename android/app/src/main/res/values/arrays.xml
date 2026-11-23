@@ -20,16 +20,24 @@
         <item>2× (512×384)</item>
         <item>3× (768×576)</item>
         <item>4× (1024×768)</item>
+        <item>5× (1280×960)</item>
         <item>6× (1536×1152)</item>
+        <item>7× (1792×1344)</item>
         <item>8× (2048×1536)</item>
+        <item>9× (2304×1728)</item>
+        <item>10× (2560×1920)</item>
     </string-array>
     <string-array name="gpu_scale_values" translatable="false">
         <item>1</item>
         <item>2</item>
         <item>3</item>
         <item>4</item>
+        <item>5</item>
         <item>6</item>
+        <item>7</item>
         <item>8</item>
+        <item>9</item>
+        <item>10</item>
     </string-array>
 
     <string-array name="filter_entries">
@@ -281,12 +289,10 @@
     <string-array name="aa_entries">
         <item>Off</item>
         <item>On</item>
-        <item>Enhanced (edge cut)</item>
     </string-array>
     <string-array name="aa_values" translatable="false">
         <item>off</item>
         <item>on</item>
-        <item>enhanced</item>
     </string-array>
     <string-array name="rumble_entries">
         <item>When the device or controller can vibrate</item>

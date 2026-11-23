@@ -32,7 +32,9 @@ static void devices() {
     BootProbe p; p.dual_window = true; p.display_env = true; p.has_dri = true; p.fb0_ok = true;
     const BootPlan b = plan_boot(p);
     CHECK(b.panel == Sink::Count && !b.headless_driver && b.notes.empty());
-    CHECK(eq(plan_window({b.want, "wayland", "", ""}), "dmabuf,surface,renderer"));
+    CHECK(eq(plan_window({b.want, "wayland", "", ""}), "dmabuf,renderer"));
+    // Rotated, the shm surface stays ahead of the renderer, which cannot rotate.
+    CHECK(eq(plan_window({b.want, "wayland", "", "", true}), "dmabuf,surface,renderer"));
   }
   // Same device single-window: a Wayland desktop with an fb0 never takes fbdev.
   {
@@ -115,11 +117,31 @@ static void overrides() {
     CHECK(b.panel == Sink::Disp && b.notes.size() == 1);
   }
   // DS_DMABUF / DS_SCANLINE_SCALE.
-  CHECK(eq(plan_window({Sink::Count, "wayland", "0", ""}), "surface,renderer"));
+  CHECK(eq(plan_window({Sink::Count, "wayland", "0", ""}), "renderer"));
+  CHECK(eq(plan_window({Sink::Count, "wayland", "", "1"}), "dmabuf,surface,renderer"));
   CHECK(eq(plan_window({Sink::Count, "KMSDRM", "0", ""}), "surface,renderer"));
   CHECK(plan_window({Sink::Count, "wayland", "1", ""}).required);
   CHECK(!plan_window({Sink::Count, "x11", "1", ""}).required);
   CHECK(eq(plan_window({Sink::Count, "wayland", "", "0"}), "renderer"));
+  // KMSDRM's window surface on a large panel is slower than the renderer (issue #49: 1440x1600), unless the
+  // picture is rotated (the renderer applies none) or the scanline sinks are asked for.
+  CHECK(eq(plan_window({Sink::Count, "KMSDRM", "", "", false, 640u * 480u}), "kms,surface,renderer"));
+  CHECK(eq(plan_window({Sink::Count, "KMSDRM", "", "", false, 1600u * 1440u}), "kms,renderer"));
+  CHECK(eq(plan_window({Sink::Count, "KMSDRM", "", "", true, 1600u * 1440u}), "kms,surface,renderer"));
+  CHECK(eq(plan_window({Sink::Count, "KMSDRM", "", "1", false, 1600u * 1440u}), "kms,surface,renderer"));
+  CHECK(eq(plan_window({Sink::Surface, "KMSDRM", "", "", false, 1600u * 1440u}), "surface,renderer"));
+  // The KMS mode for a window: its exact size, else the panel's own shape under an SDL that reports it turned.
+  {
+    const std::vector<ModeSize> portrait = {{1440, 1600}}, both = {{1600, 1440}, {1440, 1600}}, square = {{720, 720}};
+    bool t = true;
+    CHECK(pick_kms_mode(portrait, 1440, 1600, &t) == 0 && !t);
+    CHECK(pick_kms_mode(portrait, 1600, 1440, &t) == 0 && t);
+    CHECK(pick_kms_mode(portrait, 1600, 1440, nullptr) == -1);
+    CHECK(pick_kms_mode(both, 1600, 1440, &t) == 0 && !t);
+    CHECK(pick_kms_mode(portrait, 1280, 720, &t) == -1 && !t);
+    CHECK(pick_kms_mode(square, 720, 720, &t) == 0 && !t);
+    CHECK(pick_kms_mode({}, 640, 480, &t) == -1 && !t);
+  }
   CHECK(eq(plan_window({Sink::Count, "x11", "", "1"}), "surface,renderer"));
   CHECK(eq(plan_window({Sink::Dmabuf, "wayland", "0", ""}), "renderer"));
   // Names round-trip.

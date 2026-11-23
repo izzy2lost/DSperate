@@ -47,6 +47,17 @@ class Settings private constructor(private val file: File) {
         stamp = file.lastModified() to file.length()
     }
 
+    /**
+     * One-off fixes to stored values. Landscape was stacked by default once, and opening the
+     * settings screen saved that default as if it had been chosen: those installs move to
+     * hybrid, today's default, once. A stacked landscape picked after this stays.
+     */
+    private fun migrate() = synchronized(lock) {
+        if (getInt(MIGRATED, 0) >= 1) return@synchronized
+        if (getString(LAYOUT_LANDSCAPE, "") == ScreenLayout.VERTICAL) put(LAYOUT_LANDSCAPE, ScreenLayout.HYBRID)
+        put(MIGRATED, 1)
+    }
+
     // Typed accessors. The defaults here must match res/xml/preferences.xml.
     var romTreeUri: String
         get() = getString(ROM_TREE_URI, "")
@@ -55,12 +66,14 @@ class Settings private constructor(private val file: File) {
     val jit get() = getBoolean(JIT, true)
     val fastTiming get() = getBoolean(FAST_TIMING, true)
     val gpu3d get() = getBoolean(GPU3D, false)
-    /** off, on or enhanced (the edge cut). Before this list it was the ANTI_ALIASING switch. */
-    val aaMode get() = getString(AA_MODE, if (getBoolean(ANTI_ALIASING, false)) "on" else "off")
-    /** For nativeBoot: 0 off, 1 on, 2 enhanced. */
-    val aaLevel get() = when (aaMode) { "on" -> 1; "enhanced" -> 2; else -> 0 }
+    /** off or on. Before this list it was the ANTI_ALIASING switch; "enhanced" (the edge cut, gone from the core) reads as on. */
+    val aaMode get() = when (getString(AA_MODE, if (getBoolean(ANTI_ALIASING, false)) "on" else "off")) { "on", "enhanced" -> "on"; else -> "off" }
+    /** For nativeBoot: 0 off, 1 on. */
+    val aaLevel get() = if (aaMode == "on") 1 else 0
+    /** Smooth textures: not in the core's current GPU raster; kept so the stored choice survives. */
     val texFilter get() = getBoolean(TEX_FILTER, false)
-    val gpuScale get() = getString(GPU_SCALE, "1").toIntOrNull()?.coerceIn(1, 8) ?: 1
+    /** 1, 2 or 4 (the core's GPU raster scales); older 3x, 6x and 8x choices read as the nearest below. */
+    val gpuScale get() = getString(GPU_SCALE, "1").toIntOrNull()?.coerceIn(1, 10) ?: 1
     val firmwareBoot get() = getBoolean(FIRMWARE_BOOT, false)
     /** What a second display (dual-screen device or external monitor) shows: SECOND_*. */
     val secondDisplay get() = getString(SECOND_DISPLAY, SECOND_BOTTOM)
@@ -185,6 +198,7 @@ class Settings private constructor(private val file: File) {
         const val FF_TOGGLE = "ff_toggle"
         const val AUTO_SAVE_STATE = "auto_save_state"
         const val LAYOUT_LANDSCAPE = "layout_landscape"
+        const val MIGRATED = "settings_migrated"
         const val SECOND_DISPLAY = "second_display"
         const val SECOND_BOTTOM = "bottom"   // the bottom screen there, the top one on the device
         const val SECOND_TOP = "top"         // the top screen there, the bottom one (touch) on the device
@@ -229,7 +243,7 @@ class Settings private constructor(private val file: File) {
 
         fun get(context: Context): Settings =
             instance ?: synchronized(this) {
-                instance ?: Settings(File(context.applicationContext.filesDir, "settings.properties")).also { instance = it }
+                instance ?: Settings(File(context.applicationContext.filesDir, "settings.properties")).also { it.migrate(); instance = it }
             }
 
         /**

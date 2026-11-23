@@ -84,7 +84,8 @@ std::string Session::boot(const SessionConfig& cfg) {
   // The core's fastmem views are laid in 4 KB host pages; a 16 KB-page kernel
   // would refuse them, so the recompiler goes through the page table instead.
   if (sysconf(_SC_PAGESIZE) != 4096) setenv("DS_FASTMEM", "0", 1);
-  ds::g_fast_timing = cfg.fast_timing && ds::kFastTimingAvailable;
+  // Fast where the recompiler has it; DSiWare switches to exact (boot_dsiware).
+  ds::set_timing(cfg.fast_timing ? "fast" : "exact");
   // Phones are big.LITTLE: the handheld pinning (emulation on the last core,
   // the device's interrupts on core 0) does not fit them. Let the scheduler place threads.
   ds::set_thread_layout(false);
@@ -165,27 +166,25 @@ std::string Session::boot(const SessionConfig& cfg) {
     LOGI("jit: strict timing for the DS menu");
   }
 #endif
+  // video.aa: 4x MSAA on the GPU raster, the hardware's edge blend on the CPU.
   nds.gpu3d.renderer().set_aa(cfg.aa != 0);
-  nds.gpu3d.renderer().set_aa_enhanced(cfg.aa == 2);
-  // Upscaled 3D and smoothed textures are the GPU raster's: either turns it on.
-  const int scale = std::clamp(cfg.gpu_scale, 1, 8);
-  if (cfg.gpu3d || scale > 1 || cfg.tex_filter) {
+  // Upscaled 3D is the Vulkan raster's (1x to 10x): above 1x it turns the GPU raster on.
+  const int scale = cfg.gpu_scale < 1 ? 1 : cfg.gpu_scale > 10 ? 10 : cfg.gpu_scale;
+  if (cfg.gpu3d || scale > 1) {
     // Compiled pipelines are kept between runs (the Mali blob takes seconds
     // to build them from SPIR-V); set before the first Vulkan device opens.
     ds::gpu::vk::Device::set_pipeline_cache_file(cfg.cache_dir + "/vk_pipelines.bin");
     std::string why;
     nds.gpu3d.renderer().set_gpu_scale(static_cast<ds::u32>(scale));
-    nds.gpu3d.renderer().set_gpu_tex_filter(cfg.tex_filter);
-    // Enhanced AA is the edge cut, drawn by the presenter from the core's
-    // edge planes: at 1x only (above, the raster keeps MSAA). Before the
-    // raster starts: its AA is fixed at creation.
-    if (cfg.aa == 2 && scale == 1) nds.gpu.set_edge_export(true);
     if (!nds.gpu3d.renderer().set_gpu(true, &why)) {
       LOGW("gpu3d: unavailable (%s), drawing on the CPU", why.c_str());
-      nds.gpu.set_edge_export(false);   // the CPU raster shows the hardware's blend
     } else {
-      LOGI("gpu3d: on (%s, %dx%s)", nds.gpu3d.renderer().gpu_api(), scale, nds.gpu.edge_export() ? ", edge cut" : "");
-      if (scale > 1) nds.gpu.set_hires(true);
+      const ds::u32 got = nds.gpu3d.renderer().gpu_scale();
+      LOGI("gpu3d: on (%s, %ux)", nds.gpu3d.renderer().gpu_api(), got);
+      // Above 1x the 3D reaches the screen through the 3D split (core/gpu/split3d.h):
+      // engine A composes without it and the presenter merges the raster's image.
+      merge3d_ = got > 1;
+      nds.gpu.set_split3d_present(merge3d_);
     }
   }
   fill_slot2("", "");
@@ -256,6 +255,8 @@ std::string Session::boot_dsiware(ds::NDS& nds) {
   if (!nds.load_dsi_bios(b9i, b7i, &err)) return "DSi BIOS: " + err.substr(err.rfind('/') + 1);
   nds.set_dsi(true);
   nds.dsi_hle_launch = true;
+  // As the desktop does: DSi system software races the fast model (it is tuned on DS games).
+  ds::set_timing("exact");
   std::vector<std::string> made;
   if (!nds.prepare_dsi_hle(cfg_.user, &err, &made)) return "DSi: " + err;
   for (const std::string& m : made) LOGI("dsi: %s", m.c_str());
@@ -292,6 +293,21 @@ bool Session::game_launched(ds::NDS& nds) {
   const ds::cart::Header& h = nds.cart->header();
   const uint32_t pc = nds.arm9->hot.regs[15];
   return pc >= h.arm9_ram_address && pc - h.arm9_ram_address < h.arm9_size;
+}
+
+void Session::snapshot(std::vector<uint32_t>& out) {
+  const size_t n = static_cast<size_t>(ds::SCREEN_W) * ds::SCREEN_H;
+  out.assign(2 * n, 0xFF000000u);
+  post([&] {
+    if (!nds_) return;
+    ds::NDS& nds = *nds_;
+    for (int sc = 0; sc < 2; ++sc) {
+      // A screen split for the merge holds no 3D: merged here, at 1x, from the record.
+      ds::gpu::Gpu::Split3DScreen sf;
+      if (nds.gpu.split3d_screen(sc, &sf) && sf.live) nds.gpu.merge_split3d(sc, out.data() + sc * n);
+      else std::memcpy(out.data() + sc * n, nds.gpu.framebuffer(sc), n * 4);
+    }
+  }, true);
 }
 
 std::string Session::boot_note() {
@@ -709,30 +725,32 @@ void Session::run_one_frame() {
   static Clock::time_point last_submit;
   const Clock::time_point now = Clock::now();
   if (drawn && (!ff || now - last_submit >= std::chrono::milliseconds(14))) {
-    const ds::gpu::Gpu::Hires& h = nds.gpu.hires();
-    if ((h.layer3d || h.layer3d_buffer) && h.scale > 1) {
-      // Copied now: the line records are reused by later frames. The 3D
-      // picture is copied too, unless it came as a buffer (zero-copy), which
-      // is referenced instead.
-      const size_t n = static_cast<size_t>(ds::SCREEN_W) * ds::SCREEN_H;
-      hires_.valid = true;
-      hires_.scale = h.scale;
-      hires_.desc.assign(h.desc.begin(), h.desc.end());
-      hires_.operand.assign(h.operand.begin(), h.operand.end());
-      hires_.line.assign(h.line.begin(), h.line.end());
-      hires_.release_buffer();
-      if (h.layer3d_buffer) {
-        hires_.buffer = static_cast<AHardwareBuffer*>(const_cast<void*>(h.layer3d_buffer));
-        AHardwareBuffer_acquire(hires_.buffer);
-        hires_.layer.clear();
-      } else {
-        hires_.layer.assign(h.layer3d, h.layer3d + n * h.scale * h.scale);
+    if (merge3d_) {
+      // Each split screen with the raster's image of its 3D frame goes to the
+      // presenter for the merge; one whose image is gone is merged on the CPU now.
+      bool resolve = false;
+      for (int sc = 0; sc < 2; ++sc) {
+        HiresScreen& hs = hires_.s[sc];
+        hs.release_buffer();
+        hs.on = false;
+        ds::gpu::Gpu::Split3DScreen sf;
+        if (!nds.gpu.split3d_screen(sc, &sf)) continue;
+        ds::u32 sc_scale = 1;
+        void* buf = nds.gpu3d.renderer().gpu_layer_buffer(sf.gen, &sc_scale);
+        if (!buf) { resolve |= sf.live; continue; }
+        const size_t n = static_cast<size_t>(ds::SCREEN_W) * ds::SCREEN_H;
+        hs.on = true;
+        hs.scale = sc_scale;
+        hs.buffer = static_cast<AHardwareBuffer*>(buf);
+        AHardwareBuffer_acquire(hs.buffer);
+        hs.words.assign(sf.words, sf.words + n);
+        hs.lines.assign(sf.lines, sf.lines + ds::SCREEN_H);
+        hs.coords = sf.coords != nullptr;
+        if (hs.coords) hs.xy.assign(sf.coords, sf.coords + n);
+        hs.scrolled = sf.scrolled;
       }
+      if (resolve) nds.gpu.resolve_split3d();
       presenter_.submit(nds.gpu.framebuffer(0), nds.gpu.framebuffer(1), &hires_);
-    } else if (nds.gpu.edge_export()) {
-      const uint32_t* planes[2] = {nds.gpu.edge_plane(0), nds.gpu.edge_plane(1)};
-      const uint64_t* rows[2] = {nds.gpu.edge_rows(0), nds.gpu.edge_rows(1)};
-      presenter_.submit(nds.gpu.framebuffer(0), nds.gpu.framebuffer(1), nullptr, planes, rows);
     } else {
       presenter_.submit(nds.gpu.framebuffer(0), nds.gpu.framebuffer(1));
     }

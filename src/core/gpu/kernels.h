@@ -25,6 +25,44 @@ inline Pixel resolve_one(const Pixel* tab, u16 c) {
   return (tab == direct_table() ? direct_colour(c) : tab[c & 0x7FFF]) | 0xFF000000;
 }
 
+// Colour correction of the output stage (core/gpu/colour.h builds one): a
+// "gamma in, 3x3 matrix, curve out" model, separable at the 6 bits a channel
+// the DS shows. A channel's top 6 bits index the input curve (linear, Q15:
+// 1.0 = 32768, at most 32767; split in bytes so NEON looks it up by tbl). The
+// matrix is Q15 and each term is rounded as vqrdmulh rounds it,
+// (2*l*m + 2^15) >> 16, so NEON mixes eight 16-bit lanes at a time: the two
+// outer terms first (|m0| + |m2| <= 1, so that cannot overflow), then the
+// middle one with saturation, which is the clamp at 1.0. The sum, clamped to
+// 0..32767, indexes the output curve (colour_index): exactly below 512, where
+// the curve is steep, else in steps of 8, sampled mid-step.
+struct ColourLut {
+  static constexpr u32 ONE = 32768, FINE = 512, CURVE = FINE + ONE / 8 - FINE / 8;
+  alignas(16) u8 lin_lo[64];
+  alignas(16) u8 lin_hi[64];
+  s16 m[9];                       // row-major: out channel (r, g, b) by in channel
+  u8 curve[3][CURVE];
+};
+// Output-curve entry of a clamped sum s (0..ONE-1).
+inline u32 colour_index(u32 s) { return s < ColourLut::FINE ? s : ColourLut::FINE - ColourLut::FINE / 8 + (s >> 3); }
+// One pixel of kern::colour_correct (0xAARRGGBB, alpha kept): the reference kernel.
+inline u32 colour_pixel(const ColourLut& t, u32 p) {
+  s32 l[3];
+  for (u32 c = 0; c < 3; ++c) {
+    const u32 idx = ((p >> (16 - 8 * c)) & 0xFF) >> 2;
+    l[c] = static_cast<s32>(t.lin_lo[idx] | (static_cast<u32>(t.lin_hi[idx]) << 8));
+  }
+  u32 out = p & 0xFF000000;
+  for (u32 k = 0; k < 3; ++k) {
+    s32 term[3];
+    for (u32 c = 0; c < 3; ++c) term[c] = (2 * l[c] * t.m[3 * k + c] + 32768) >> 16;
+    s32 s = term[0] + term[2];
+    s += term[1];
+    s = s < 0 ? 0 : s > 32767 ? 32767 : s;   // the saturating add's top, then the floor
+    out |= static_cast<u32>(t.curve[k][colour_index(static_cast<u32>(s))]) << (16 - 8 * k);
+  }
+  return out;
+}
+
 #define DS_KERNEL_LIST(NS)                                                                                   \
   /* Priority select of one layer line into top/second values and table ids. */                             \
   void NS##select16(const u16* v, const u8* win, u8 wbit, u8 tid, u16* top, u8* top_tid, u16* second, u8* second_tid); \
@@ -83,11 +121,18 @@ inline Pixel resolve_one(const Pixel* tab, u16 c) {
   void NS##output_line(const Pixel* src, u16 reg, u32* dst);                                                 \
   /* From a BGR555 line. */                                                                                   \
   void NS##output_vram_line(const u16* src, u16 reg, u32* dst);                                               \
+  /* Colour correction (ColourLut) of an output line of 0xAARRGGBB, in place; alpha kept. Per out channel k:  \
+     t_c = (2 * L[in_c >> 2] * m[3k+c] + 2^15) >> 16, s = clamp(t0 + t2 + t1, 0, 32767), curve[k][colour_index(s)], where \
+     L[i] = lin_lo[i] | lin_hi[i] << 8 (colour_pixel). */                                                     \
+  void NS##colour_correct(const ColourLut& t, u32* dst);                                                     \
   /* Display capture, source A only: 18-bit records (alpha bits 24-31, non-zero=opaque) -> BGR555, bit 15 = alpha bit. */ \
   void NS##capture_a15(const Pixel* src, u32 n, u16* dst);                                                   \
   /* Capture blend: A as above, B a BGR555 line, alpha in bit 15. Per channel ((ca*aa*eva)+(cb*ab*evb)+8)>>4  \
      clamped to 31; alpha bit (eva?aa:0)|(evb?ab:0). eva/evb in 0..16. Missing B is a zeroed line. */         \
   void NS##capture_blend(const Pixel* srca, const u16* srcb, u32 n, u32 eva, u32 evb, u16* dst);             \
+  /* The 3D split's merge of one line (split3d.h, merge_pixel per pixel): words, the line without the 3D     \
+     layer, the 3D line; 256 pixels. */                                                                      \
+  void NS##split_merge_line(const u32* words, const Pixel* u, const Pixel* line3d, Pixel* out);              \
   /* Nearest-neighbour scale to xrun[256] destination pixels. xrun[257]: source pixel s covers destination   \
      [xrun[s], xrun[s+1]) -- inverse of dst_x -> src_x map, so no gather needed. Monotonic non-decreasing. */ \
   void NS##scale_row(const u32* src, const u16* xrun, u32* dst);                                             \
@@ -144,8 +189,7 @@ inline Pixel resolve_one(const Pixel* tab, u16 c) {
 
 namespace ref { DS_KERNEL_LIST() }
 namespace ref {
-// One pixel of composite_line / composite_line_fade, for the edge cut's
-// unblended colours (Engine2D::edge_compose): the same arithmetic, scalar.
+// One pixel of composite_line / composite_line_fade: the same arithmetic, scalar.
 Pixel composite_pixel(u32 bldcnt, u32 eva, u32 evb, u32 evy, Pixel a, Pixel b, u8 top_id, u8 kind, u8 top_alpha, u8 second_id, u8 win);
 Pixel fade_pixel(u32 bldcnt, u32 evy, Pixel a, u8 top_id, u8 win);
 }

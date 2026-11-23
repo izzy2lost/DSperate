@@ -4,9 +4,11 @@
 #include "display.h"
 #include "pad_faces.h"
 #include "core/nds.h"
+#include "frontend/i18n/i18n.h"
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cctype>
 #include <cstring>
 #include <cmath>
@@ -105,6 +107,15 @@ const char* pad_token_label(const std::string& s) {
 
 const char* action_name(Action a) { return kActionNames[static_cast<int>(a)]; }
 
+// What the Controls page calls each hotkey, in English (translated where drawn).
+const char* const kActionLabels[static_cast<int>(Action::Count)] = {
+  N_("QUIT"), N_("PAUSE"), N_("FAST FORWARD"),
+  N_("FF TOGGLE"),   // "FAST FORWARD TOGGLE" doesn't fit the row at the menu's size
+  N_("SAVE STATE"), N_("LOAD STATE"), N_("SLOT NEXT"), N_("SLOT PREV"),
+  N_("VOLUME UP"), N_("VOLUME DOWN"), N_("MUTE"), N_("LAYOUT NEXT"), N_("LAYOUT PREV"), N_("SCREEN SWAP"),
+  N_("PIP CORNER NEXT"), N_("FULLSCREEN"), N_("SCREENSHOT"), N_("LID"), N_("MIC"), N_("FPS")};
+const char* action_label(Action a) { return kActionLabels[static_cast<int>(a)]; }
+
 Input::Bind Input::parse_key(const std::string& s0) {
   Bind b;
   if (s0 == "mod") { b.kind = Bind::ModAlone; return b; }
@@ -166,10 +177,20 @@ Input::AnalogMode Input::analog_mode() const {
 }
 
 bool Input::analog_claims(StylusAxis s) const {
+  if (s != StylusAxis::None && s == motion_stick_) return true;
   if (!analog_patch_ || s == StylusAxis::None) return false;
   const AnalogMode m = analog_mode();
   if (m == AnalogMode::Dual) return true;
   return s == (m == AnalogMode::Left ? StylusAxis::Left : m == AnalogMode::Right ? StylusAxis::Right : StylusAxis::None);
+}
+
+void Input::set_motion_stick(const std::string& which) {
+  const StylusAxis s = which == "left" ? StylusAxis::Left : which == "right" ? StylusAxis::Right : StylusAxis::None;
+  if (s == motion_stick_) return;
+  motion_stick_ = s;
+  // As set_analog_patch: directions the claimed stick was holding would otherwise stay held.
+  if (analog_claims(stick_dpad_)) { stick_ = 0; stick_prev_ = 0; dstick_x_ = dstick_y_ = 0; }
+  if (analog_claims(stick_face_)) face_stick_ = 0;
 }
 
 void Input::set_analog_patch(bool on) {
@@ -411,6 +432,35 @@ void Input::detect_faces() {
                phys[0] != 0 && phys[2] != 2 ? "a/b and x/y" : phys[0] != 0 ? "a/b" : "x/y");
 }
 
+// SDL's sensors arrived in 2.0.14; an older library has none to offer.
+bool Input::pad_has_motion() const {
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+  return pad_ && SDL_GameControllerHasSensor(pad_, SDL_SENSOR_ACCEL) == SDL_TRUE;
+#else
+  return false;
+#endif
+}
+
+bool Input::pad_motion(slot2::Motion& m) {
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+  if (!pad_has_motion()) return false;
+  if (!SDL_GameControllerIsSensorEnabled(pad_, SDL_SENSOR_ACCEL)) {
+    SDL_GameControllerSetSensorEnabled(pad_, SDL_SENSOR_ACCEL, SDL_TRUE);
+    if (SDL_GameControllerHasSensor(pad_, SDL_SENSOR_GYRO)) SDL_GameControllerSetSensorEnabled(pad_, SDL_SENSOR_GYRO, SDL_TRUE);
+  }
+  float a[3];
+  if (SDL_GameControllerGetSensorData(pad_, SDL_SENSOR_ACCEL, a, 3) != 0) return false;
+  // SDL's frame for a pad held flat: X right, Y up out of its face, Z towards
+  // the player. The console's has Y up the screen and Z out of it.
+  m.ax = a[0]; m.ay = -a[2]; m.az = a[1];
+  float g[3];
+  m.gz = SDL_GameControllerIsSensorEnabled(pad_, SDL_SENSOR_GYRO) && SDL_GameControllerGetSensorData(pad_, SDL_SENSOR_GYRO, g, 3) == 0 ? g[1] : 0;
+  return true;
+#else
+  (void)m; return false;
+#endif
+}
+
 bool Input::has_rumble() const {
   return pad_ && SDL_GameControllerHasRumble(pad_);
 }
@@ -500,6 +550,9 @@ Input::Panel Input::touch_panel(SDL_TouchID id) {
   touch_cache_.emplace_back(id, p);
   return p;
 }
+
+// DS_TOUCH_DEBUG: each finger down/up through the mapping, for panels we can't test on.
+static bool touch_debug() { static const bool on = std::getenv("DS_TOUCH_DEBUG") != nullptr; return on; }
 
 // Dual-window: the window a finger belongs to. SDL's evdev backend (KMSDRM)
 // attaches no window to touches, so an unmapped one goes to the lower panel.
@@ -821,7 +874,7 @@ void Input::update_stylus() {
 std::string Input::pad_label(const std::string& s0) {
   std::string s = s0, out;
   if (s.compare(0, 4, "mod+") == 0) { out = "MOD+"; s = s.substr(4); }
-  if (s.empty() || s == "none" || s == "null") return out.empty() ? std::string("NONE") : out + "NONE";
+  if (s.empty() || s == "none" || s == "null") return out + i18n::tr("NONE");
   std::string head = s, with;
   if (const size_t plus = s.find('+', 1); plus != std::string::npos && s[0] != '+' && s[0] != '-') {
     head = s.substr(0, plus);
@@ -1063,7 +1116,8 @@ std::vector<std::string> Input::collisions() const {
   // First: this one cannot be recovered from without a text editor.
   for (const int i : {static_cast<int>(B::BTN_A), static_cast<int>(B::BTN_B)})
     if (!reachable(i))
-      out.push_back(std::string(kButtonNames[i]) + (pad_ ? " IS UNREACHABLE; \x04 TWICE RESETS" : " IS UNREACHABLE; X TWICE RESETS"));
+      // TRANSLATORS: {1} is a DS button (A or B), {2} the button that resets the bindings.
+      out.push_back(i18n::trf("{1} IS UNREACHABLE; {2} TWICE RESETS", {kButtonNames[i], pad_ ? "\x04" : "X"}));
   const auto same = [](const Bind& a, const Bind& b) {
     return a.kind != Bind::None && a.kind == b.kind && a.code == b.code &&
            a.neg == b.neg && a.mod == b.mod && a.with == b.with;
@@ -1071,17 +1125,19 @@ std::vector<std::string> Input::collisions() const {
   // Two DS buttons on one control: the second never fires.
   for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i)
     for (int j = i + 1; j < static_cast<int>(B::BTN_COUNT); ++j) {
-      if (same(key_map_[i], key_map_[j])) out.push_back(std::string(kButtonNames[i]) + " AND " + kButtonNames[j] + " SHARE A KEY");
-      if (same(pad_map_[i], pad_map_[j])) out.push_back(std::string(kButtonNames[i]) + " AND " + kButtonNames[j] + " SHARE A BUTTON");
+      // TRANSLATORS: {1} and {2} are DS buttons (A, B, SELECT...).
+      if (same(key_map_[i], key_map_[j])) out.push_back(i18n::trf("{1} AND {2} SHARE A KEY", {kButtonNames[i], kButtonNames[j]}));
+      if (same(pad_map_[i], pad_map_[j])) out.push_back(i18n::trf("{1} AND {2} SHARE A BUTTON", {kButtonNames[i], kButtonNames[j]}));
     }
   if (pad_mod_alone_ >= 0 && pad_mod_button_ >= 0)
-    out.push_back(std::string(kActionNames[pad_mod_alone_]) + " HIDES PAD " + kButtonNames[pad_mod_button_]);
+    out.push_back(i18n::trf("{1} HIDES PAD {2}", {i18n::tr(kActionLabels[pad_mod_alone_]), kButtonNames[pad_mod_button_]}));
   // A hotkey on the same control as a DS button: hotkey tried first, button dead.
   for (int a = 0; a < static_cast<int>(Action::Count); ++a)
     for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i) {
       for (int sl = 0; sl < HOT_SLOTS; ++sl) {
-        if (same(key_hot_[a][sl], key_map_[i])) out.push_back(std::string(kActionNames[a]) + " HIDES KEY " + kButtonNames[i]);
-        if (same(pad_hot_[a][sl], pad_map_[i])) out.push_back(std::string(kActionNames[a]) + " HIDES PAD " + kButtonNames[i]);
+        // TRANSLATORS: {1} is a hotkey (SAVE STATE...), {2} a DS button (A, B, SELECT...).
+        if (same(key_hot_[a][sl], key_map_[i])) out.push_back(i18n::trf("{1} HIDES KEY {2}", {i18n::tr(kActionLabels[a]), kButtonNames[i]}));
+        if (same(pad_hot_[a][sl], pad_map_[i])) out.push_back(i18n::trf("{1} HIDES PAD {2}", {i18n::tr(kActionLabels[a]), kButtonNames[i]}));
       }
     }
   return out;
@@ -1152,10 +1208,21 @@ void Input::handle(const SDL_Event& e0, Display& display, Display* second) {
     if (!d) break;
     int w = 0, h = 0;
     d->output_size(w, h);
-    touch_at(static_cast<int>(e.tfinger.x * w), static_cast<int>(e.tfinger.y * h), *d);
+    const int wx = static_cast<int>(e.tfinger.x * w), wy = static_cast<int>(e.tfinger.y * h);
+    if (touch_debug() && e.type == SDL_FINGERDOWN) {
+      int ww = 0, wh = 0;
+      if (SDL_Window* sw = SDL_GetWindowFromID(d->window_id())) SDL_GetWindowSize(sw, &ww, &wh);
+      int scr = -1, sx = -1, sy = -1;
+      const bool hit = d->map_point(wx, wy, scr, sx, sy);
+      std::fprintf(stderr, "touch-dbg: down norm %.4f,%.4f ev-win %u -> %s win %u (window %dx%d, output %dx%d) px %d,%d -> %s screen %d ds %d,%d\n",
+                   static_cast<double>(e.tfinger.x), static_cast<double>(e.tfinger.y), e.tfinger.windowID,
+                   d == second ? "lower" : "upper", d->window_id(), ww, wh, w, h, wx, wy, hit ? "hit" : "miss", scr, sx, sy);
+    }
+    touch_at(wx, wy, *d);
     break;
   }
   case SDL_FINGERUP:
+    if (touch_debug()) std::fprintf(stderr, "touch-dbg: up ev-win %u\n", e.tfinger.windowID);
     if (finger_target(e.tfinger, display, second)) touching_ = false;
     break;
 

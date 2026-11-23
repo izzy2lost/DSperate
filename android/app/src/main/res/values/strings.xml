@@ -58,6 +58,8 @@
     <string name="library_empty_no_games">No Nintendo DS games were found in that folder.</string>
     <string name="choose_folder">Choose ROM folder</string>
     <string name="choose_other_folder">Choose another folder</string>
+    <string name="folder_access_lost_title">ROM folder needs permission</string>
+    <string name="folder_access_lost">NinDS can no longer open your ROM folder (this happens after a reinstall). Choose the folder again to play.</string>
     <string name="scanning_progress">Scanning %1$d of %2$d</string>
     <string name="scan_failed">Could not read the folder: %1$s</string>
     <string name="game_play">Play</string>
@@ -138,14 +140,14 @@
     <string name="pref_gpu3d">GPU 3D</string>
     <string name="pref_gpu3d_summary">Draws 3D on the GPU instead of the CPU. Helps heavy 3D games on slower phones.</string>
     <string name="pref_gpu_scale">3D resolution</string>
-    <string name="pref_gpu_scale_note">Above native uses GPU 3D. Each step costs GPU time: 6× and 8× need a high-end GPU.</string>
+    <string name="pref_gpu_scale_note">Above native uses GPU 3D (Vulkan). Each step costs GPU time: 6× and above need a high-end GPU.</string>
     <string name="pref_tex_filter">Smooth textures</string>
     <string name="pref_tex_filter_summary">Bilinear filtering for 3D textures. Uses GPU 3D.</string>
     <string name="pref_gpu_needs_vulkan">Needs Vulkan, which this device doesn\'t have. 3D is drawn on the CPU at native resolution.</string>
     <string name="pref_gpu_gles_only">No Vulkan here: GPU 3D runs on OpenGL ES at native resolution. Higher resolutions and smooth textures need Vulkan.</string>
     <string name="pref_aa">3D anti-aliasing</string>
     <string name="pref_aa_summary">The DS\'s own edge smoothing, as games request it</string>
-    <string name="pref_aa_note">Enhanced cuts 3D edges at screen resolution instead of blending them. It needs GPU 3D at native resolution; above that it is the same as On.</string>
+    <string name="pref_aa_note">With GPU 3D this is 4× multisampling; on the CPU it is the DS\'s own edge blend.</string>
     <string name="pref_frameskip">Frame skip</string>
     <string name="pref_ff_speed">Fast-forward speed</string>
     <string name="pref_ff_toggle">Fast-forward button toggles</string>

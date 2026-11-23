@@ -7,6 +7,7 @@
 // byte planes (ids, kinds, masks) are handled 16 at a time, widened to u32
 // lane masks where they gate colour lanes.
 #include "core/gpu/kernels.h"
+#include "core/gpu/split3d.h"
 #include "core/div64.h"
 
 #if DSPERATE_NEON
@@ -677,6 +678,52 @@ void output_vram_line(const u16* src, u16 reg, u32* dst) {
   }
 }
 
+// Sixteen pixels a step: the input curve is two 64-byte tbl lookups a
+// channel (low and high byte of the linear value), the matrix vqrdmulh in
+// eight 16-bit lanes, the output curve's index likewise. The curve itself is
+// a gather: the indices leave the vector unit as 64-bit lanes (four a move)
+// rather than through a stack buffer, whose narrow scalar reloads of wide
+// vector stores miss store forwarding on the in-order cores.
+void colour_correct(const ColourLut& t, u32* dst) {
+  const uint8x16x4_t tlo = {{vld1q_u8(t.lin_lo), vld1q_u8(t.lin_lo + 16), vld1q_u8(t.lin_lo + 32), vld1q_u8(t.lin_lo + 48)}};
+  const uint8x16x4_t thi = {{vld1q_u8(t.lin_hi), vld1q_u8(t.lin_hi + 16), vld1q_u8(t.lin_hi + 32), vld1q_u8(t.lin_hi + 48)}};
+  int16x8_t m[9];
+  for (u32 k = 0; k < 9; ++k) m[k] = vdupq_n_s16(t.m[k]);
+  const int16x8_t zero = vdupq_n_s16(0);
+  const uint16x8_t fine = vdupq_n_u16(ColourLut::FINE), coarse_base = vdupq_n_u16(ColourLut::FINE - ColourLut::FINE / 8);
+  const u8* const c0 = t.curve[0];
+  const u8* const c1 = t.curve[1];
+  const u8* const c2 = t.curve[2];
+  for (u32 i = 0; i < 256; i += 16) {
+    const uint8x16x4_t p = vld4q_u8(reinterpret_cast<const u8*>(dst + i));   // val[0] B, [1] G, [2] R, [3] A
+    int16x8_t l[3][2];
+    for (u32 c = 0; c < 3; ++c) {
+      const uint8x16_t idx = vshrq_n_u8(p.val[2 - c], 2);
+      const uint8x16x2_t z = vzipq_u8(compat::tbl4q_u8(tlo, idx), compat::tbl4q_u8(thi, idx));
+      l[c][0] = vreinterpretq_s16_u8(z.val[0]);
+      l[c][1] = vreinterpretq_s16_u8(z.val[1]);
+    }
+    u64 w[3][4];   // per out channel, four u16 curve indices a word
+    for (u32 k = 0; k < 3; ++k)
+      for (u32 h = 0; h < 2; ++h) {
+        int16x8_t s = vaddq_s16(vqrdmulhq_s16(l[0][h], m[3 * k]), vqrdmulhq_s16(l[2][h], m[3 * k + 2]));
+        s = vqaddq_s16(s, vqrdmulhq_s16(l[1][h], m[3 * k + 1]));
+        const uint16x8_t u = vreinterpretq_u16_s16(vmaxq_s16(s, zero));
+        const uint64x2_t ix = vreinterpretq_u64_u16(vbslq_u16(vcltq_u16(u, fine), u, vaddq_u16(vshrq_n_u16(u, 3), coarse_base)));
+        w[k][2 * h] = vgetq_lane_u64(ix, 0);
+        w[k][2 * h + 1] = vgetq_lane_u64(ix, 1);
+      }
+    for (u32 q = 0; q < 4; ++q) {
+      const u64 r = w[0][q], g = w[1][q], b = w[2][q];
+      u32* const o = dst + i + 4 * q;
+#define DS_CC_PX(j) o[j] = (o[j] & 0xFF000000) | static_cast<u32>(c0[(r >> (16 * j)) & 0xFFFF]) << 16 | \
+                           static_cast<u32>(c1[(g >> (16 * j)) & 0xFFFF]) << 8 | c2[(b >> (16 * j)) & 0xFFFF]
+      DS_CC_PX(0); DS_CC_PX(1); DS_CC_PX(2); DS_CC_PX(3);
+#undef DS_CC_PX
+    }
+  }
+}
+
 // Runs are short (2-3 pixels at the scales the handhelds use, more on a wide
 // panel), so this stores a quad when one fits and falls back to scalar for the
 // tail rather than setting up a vector loop that rarely runs.
@@ -684,6 +731,36 @@ void output_vram_line(const u16* src, u16 reg, u32* dst) {
 // channels, the 5-bit channels are a shift and a mask, and the alpha bit
 // lands in bit 15 by widening the 0/0xFF byte mask and shifting it 15 (only
 // bit 0 survives the halfword).
+// split3d::merge_pixel, four pixels a step in 32-bit lanes: red and blue
+// through the formula together 16 bits apart (a sum is below 4096), the shift
+// and the clamp in their 16-bit halves.
+void split_merge_line(const u32* words, const Pixel* u, const Pixel* line3d, Pixel* out) {
+  const uint32x4_t m1f = vdupq_n_u32(0x1F), m3f = vdupq_n_u32(0x3F), mrb = vdupq_n_u32(0x003F003F), zero = vdupq_n_u32(0);
+  const uint32x4_t one = vdupq_n_u32(1), k31 = vdupq_n_u32(31), k63 = vdupq_n_u32(63);
+  for (u32 i = 0; i < 256; i += 4) {
+    const uint32x4_t w = vld1q_u32(words + i), t = vld1q_u32(line3d + i);
+    const uint32x4_t op = vandq_u32(vshrq_n_u32(w, 28), vdupq_n_u32(3));
+    const uint32x4_t a3 = vandq_u32(vshrq_n_u32(t, 24), m1f);
+    const uint32x4_t by = vceqq_u32(op, vdupq_n_u32(2));   // ALPHA3D: the weights from the 3D pixel's alpha, of 32
+    const uint32x4_t ka = vbslq_u32(by, vaddq_u32(a3, one), vandq_u32(vshrq_n_u32(w, 18), m1f));
+    const uint32x4_t kb = vbslq_u32(by, vsubq_u32(k31, a3), vandq_u32(vshrq_n_u32(w, 23), m1f));
+    const uint32x4_t round = vbslq_u32(by, vdupq_n_u32(16), vdupq_n_u32(8));
+    const uint32x4_t c_rb = vorrq_u32(vandq_u32(w, m3f), vandq_u32(vshlq_n_u32(w, 4), vdupq_n_u32(0x003F0000)));
+    uint32x4_t rb = vmlaq_u32(vmulq_u32(round, vdupq_n_u32(0x00010001)), vandq_u32(t, mrb), ka);
+    rb = vmlaq_u32(rb, c_rb, kb);
+    uint32x4_t g = vmlaq_u32(round, vandq_u32(vshrq_n_u32(t, 8), m3f), ka);
+    g = vmlaq_u32(g, vandq_u32(vshrq_n_u32(w, 6), m3f), kb);
+    const int16x8_t sh16 = vreinterpretq_s16_u32(vbslq_u32(by, vdupq_n_u32(0xFFFBFFFB), vdupq_n_u32(0xFFFCFFFC)));   // >> 5 or >> 4
+    const int32x4_t sh32 = vreinterpretq_s32_u32(vbslq_u32(by, vdupq_n_u32(0xFFFFFFFB), vdupq_n_u32(0xFFFFFFFC)));
+    rb = vreinterpretq_u32_u16(vminq_u16(vshlq_u16(vreinterpretq_u16_u32(rb), sh16), vdupq_n_u16(63)));
+    g = vminq_u32(vshlq_u32(g, sh32), k63);
+    uint32x4_t o = vorrq_u32(vorrq_u32(rb, vshlq_n_u32(g, 8)), vdupq_n_u32(0xFF000000));
+    o = vbicq_u32(o, vandq_u32(vtstq_u32(w, vdupq_n_u32(split3d::Q15)), vdupq_n_u32(0x00010101)));
+    const uint32x4_t keep = vorrq_u32(vceqq_u32(op, zero), vceqq_u32(a3, zero));   // hidden, or no 3D pixel: the line without it
+    vst1q_u32(out + i, vbslq_u32(keep, vld1q_u32(u + i), o));
+  }
+}
+
 void capture_a15(const Pixel* src, u32 n, u16* dst) {
   const uint8x16_t v1f = vdupq_n_u8(0x1F);
   for (u32 i = 0; i < n; i += 16) {

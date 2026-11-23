@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-add_executable(dsperate main.cpp config.cpp display.cpp audio.cpp input.cpp pad_faces.cpp menu.cpp settings.cpp lid.cpp mic_alsa.cpp loader_cart.cpp dmaheap.cpp
+add_executable(dsperate main.cpp config.cpp display.cpp audio.cpp input.cpp pad_faces.cpp menu.cpp ui_font.cpp settings.cpp lid.cpp motion.cpp mic_alsa.cpp loader_cart.cpp dmaheap.cpp
   display_drm.cpp display_disp.cpp display_fbdev.cpp)
 # Required on older glibc toolchains where pthread symbols are not in libc.
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
-target_link_libraries(dsperate PRIVATE dsperate_core dsperate_frontend_video ${SDL2_LIBRARIES} ${CMAKE_DL_LIBS} Threads::Threads)
+target_link_libraries(dsperate PRIVATE dsperate_core dsperate_frontend_video dsperate_i18n ${SDL2_LIBRARIES} ${CMAKE_DL_LIBS} Threads::Threads)
 # Restamped on every build; its own translation unit so a commit recompiles nothing else.
 set(_ds_version_cpp ${CMAKE_CURRENT_BINARY_DIR}/version.cpp)
 add_custom_target(dsperate_version
@@ -18,10 +18,10 @@ if(DSPERATE_CHEEVOS)
 endif()
 target_include_directories(dsperate PRIVATE ${SDL2_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
 if(DSPERATE_WAYLAND)
-  target_sources(dsperate PRIVATE display_wl.cpp wl_dyn.cpp wl/wayland-protocol.c wl/linux-dmabuf-v1.c wl/xdg-shell.c)
+  target_sources(dsperate PRIVATE display_wl.cpp wl_dyn.cpp wl/wayland-protocol.c wl/linux-dmabuf-v1.c wl/xdg-shell.c wl/presentation-time.c)
   target_compile_definitions(dsperate PRIVATE DSPERATE_WAYLAND=1)
   # Vendored protocol code marshals through dlopen'd pointers; force-include the macro layer, no linked wayland.
-  set_source_files_properties(wl/wayland-protocol.c wl/linux-dmabuf-v1.c wl/xdg-shell.c PROPERTIES
+  set_source_files_properties(wl/wayland-protocol.c wl/linux-dmabuf-v1.c wl/xdg-shell.c wl/presentation-time.c PROPERTIES
     COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/wl_dyn.h;-I${CMAKE_CURRENT_SOURCE_DIR}/wl")
 else()
   target_sources(dsperate PRIVATE display_wl_stub.cpp)
@@ -30,7 +30,7 @@ if(DSPERATE_NET)
   target_link_libraries(dsperate PRIVATE dsperate_net)
   target_compile_definitions(dsperate PRIVATE DSPERATE_NET=1)
 endif()
-target_sources(dsperate PRIVATE gpu_present.cpp video/present_vk_import.cpp video/present_rga.cpp)
+target_sources(dsperate PRIVATE gpu_present.cpp video/present_vk_import.cpp)
 if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE)
   target_include_directories(dsperate PRIVATE ${DSPERATE_VULKAN_INCLUDE})
   set_property(SOURCE gpu_present.cpp APPEND PROPERTY COMPILE_DEFINITIONS
