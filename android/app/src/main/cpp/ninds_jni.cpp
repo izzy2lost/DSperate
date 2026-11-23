@@ -81,7 +81,7 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void*) {
 
 JNI_FN(jstring, nativeBoot)(JNIEnv* env, jobject, jint rom_fd, jstring rom_name, jstring save_path, jstring cache_dir,
                             jstring bios_dir, jboolean firmware_boot, jboolean jit, jboolean fast_timing, jboolean gpu3d,
-                            jint gpu_scale, jboolean tex_filter, jint aa, jboolean rumble, jboolean guitar_grip, jboolean analog, jstring net_mode, jstring lan_address, jboolean audio, jint volume, jstring nickname, jstring message,
+                            jint gpu_scale, jint aa, jboolean rumble, jboolean guitar_grip, jboolean analog, jstring net_mode, jstring lan_address, jboolean audio, jint volume, jstring nickname, jstring message,
                             jint birthday_month, jint birthday_day, jint colour, jint language, jstring cheevos_user, jstring cheevos_token) {
   if (g_session) { g_session->stop(); g_session.reset(); }
   ninds::SessionConfig cfg;
@@ -95,7 +95,6 @@ JNI_FN(jstring, nativeBoot)(JNIEnv* env, jobject, jint rom_fd, jstring rom_name,
   cfg.fast_timing = fast_timing;
   cfg.gpu3d = gpu3d;
   cfg.gpu_scale = gpu_scale;
-  cfg.tex_filter = tex_filter;
   cfg.aa = aa;
   cfg.rumble = rumble;
   cfg.guitar_grip = guitar_grip;

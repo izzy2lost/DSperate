@@ -71,7 +71,6 @@ class Settings private constructor(private val file: File) {
     /** For nativeBoot: 0 off, 1 on. */
     val aaLevel get() = if (aaMode == "on") 1 else 0
     /** Smooth textures: not in the core's current GPU raster; kept so the stored choice survives. */
-    val texFilter get() = getBoolean(TEX_FILTER, false)
     /** 1, 2 or 4 (the core's GPU raster scales); older 3x, 6x and 8x choices read as the nearest below. */
     val gpuScale get() = getString(GPU_SCALE, "1").toIntOrNull()?.coerceIn(1, 10) ?: 1
     val firmwareBoot get() = getBoolean(FIRMWARE_BOOT, false)
@@ -137,7 +136,7 @@ class Settings private constructor(private val file: File) {
      * achievements, the console's owner settings). A change shows up here as a different string.
      */
     fun bootFingerprint(): String = listOf(
-        jit, fastTiming, gpu3d, gpuScale, texFilter, aaMode, rumble, guitarGrip, analogControls, firmwareBoot, netMode, lanAddress,
+        jit, fastTiming, gpu3d, gpuScale, aaMode, rumble, guitarGrip, analogControls, firmwareBoot, netMode, lanAddress,
         cheevosEnabled, cheevosUser, cheevosToken, nickname, message, birthdayMonth, birthdayDay, favouriteColour, language,
     ).joinToString("|")
 
@@ -188,7 +187,6 @@ class Settings private constructor(private val file: File) {
         const val GBA_PREFIX = "gba_slot_"
         const val NO_GBA = "none"
         const val GPU_SCALE = "gpu_scale"
-        const val TEX_FILTER = "tex_filter"
         const val FIRMWARE_BOOT = "firmware_boot"
         const val INTERNET = "internet"
         const val NET_MODE = "net_mode"

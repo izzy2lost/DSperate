@@ -183,7 +183,7 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
                 NativeLib.nativeBoot(
                     pfd.fd, fileName, paths.savFile(stem).path, paths.cache.path, paths.bios.path,
                     settings.firmwareBoot, settings.jit, settings.fastTiming,
-                    gpu && settings.gpu3d, if (vulkan) settings.gpuScale else 1, vulkan && settings.texFilter, settings.aaLevel,
+                    gpu && settings.gpu3d, if (vulkan) settings.gpuScale else 1, settings.aaLevel,
                     rumbleWanted(), settings.guitarGrip, settings.analogControls,
                     settings.netMode, settings.lanAddress, settings.audio, settings.volume, settings.nickname, settings.message,
                     settings.birthdayMonth, settings.birthdayDay, settings.favouriteColour, settings.language,

@@ -40,7 +40,6 @@ struct SessionConfig {
   bool fast_timing = true;
   bool gpu3d = false;
   int gpu_scale = 1;            // 3D internal resolution (1, 2 or 4); above 1 implies the GPU raster
-  bool tex_filter = false;      // smooth textures: not in the core's current GPU raster (ignored)
   // 0 off, 1 on (4x MSAA on the GPU raster, the hardware's blend on the CPU).
   int aa = 0;
   // Slot 2 when no GBA game is inserted (set_slot2_gba): the Guitar Grip
