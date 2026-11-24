@@ -423,6 +423,11 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         super.onConfigurationChanged(newConfig)
         controls.relayout()
         updateLayout()
+        // The menu open across a rotation: its grid follows the new orientation.
+        // The views still have the old size here, so the new configuration says which way up.
+        currentDialog?.findViewById<GridLayout>(R.id.menuGrid)?.let {
+            arrangeMenuGrid(it, newConfig.orientation == Configuration.ORIENTATION_PORTRAIT)
+        }
     }
 
     private fun applyOrientation() {
@@ -743,14 +748,10 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         if (!booted || currentDialog != null || isFinishing) return
         val content = LayoutInflater.from(this).inflate(R.layout.dialog_game_menu, null, false)
         content.findViewById<TextView>(R.id.menuTitle).text = gameTitle
-        // Three columns in landscape keep the whole menu on screen; in portrait two, with the
-        // odd one out (Settings) across both.
         val grid = content.findViewById<GridLayout>(R.id.menuGrid)
-        // With the GBA button the portrait grid comes out even, and Settings keeps one column.
-        if (!isPortrait()) grid.columnCount = 3
-        else if (!NativeLib.nativeReadsGba()) content.findViewById<View>(R.id.menuSettings).updateLayoutParams<GridLayout.LayoutParams> {
-            columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 2, 1f)
-        }
+        // A GONE child still takes a GridLayout cell, so a button the game has no use for leaves the grid.
+        if (!NativeLib.nativeReadsGba()) grid.removeView(content.findViewById(R.id.menuGba))
+        arrangeMenuGrid(grid)
         val dialog = MaterialAlertDialogBuilder(this).setView(content).create()
         fun button(id: Int, then: () -> Unit) = content.findViewById<MaterialButton>(id).setOnClickListener {
             // Open what comes next before closing the menu, so the game stays paused between them.
@@ -779,6 +780,36 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         }
         button(R.id.menuExit) { exitGame() }
         present(dialog)
+    }
+
+    /**
+     * Lays the menu's grid out for the current orientation: three buttons a row in landscape (so the
+     * whole menu fits without scrolling), two in portrait. The grid has six columns in landscape and
+     * two in portrait, so a short last row's buttons share the width: in landscape a lone last button
+     * takes one from the row above (3, 3, 2, 2), in portrait it spans both columns.
+     */
+    private fun arrangeMenuGrid(grid: GridLayout, portrait: Boolean = isPortrait()) {
+        val perRow = if (portrait) 2 else 3
+        val units = if (portrait) 2 else 6
+        val n = grid.childCount
+        val rows = MutableList(n / perRow) { perRow }
+        val rest = n % perRow
+        if (rest == 1 && perRow == 3 && rows.isNotEmpty()) { rows[rows.size - 1] = 2; rows += 2 }
+        else if (rest > 0) rows += rest
+        // Every child back to one column first: a span wider than the new column count would throw.
+        for (i in 0 until n) grid.getChildAt(i).updateLayoutParams<GridLayout.LayoutParams> {
+            rowSpec = GridLayout.spec(GridLayout.UNDEFINED)
+            columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1, 1f)
+        }
+        grid.columnCount = units
+        var i = 0
+        for ((row, k) in rows.withIndex()) repeat(k) { col ->
+            val span = units / k
+            grid.getChildAt(i++).updateLayoutParams<GridLayout.LayoutParams> {
+                rowSpec = GridLayout.spec(row)
+                columnSpec = GridLayout.spec(col * span, span, 1f)
+            }
+        }
     }
 
     private fun showLayoutPicker() {
