@@ -13,6 +13,10 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
     <uses-feature android:name="android.software.leanback" android:required="false" />
+    <!-- Implied as required by CHANGE_WIFI_MULTICAST_STATE and RECORD_AUDIO; local wireless
+         and the DS microphone are optional, so devices without them can still install. -->
+    <uses-feature android:name="android.hardware.wifi" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
     <application
         android:name=".NinDSApp"
