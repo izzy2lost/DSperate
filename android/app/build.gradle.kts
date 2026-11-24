@@ -26,8 +26,8 @@ android {
         applicationId = "com.izzy2lost.ninds"
         minSdk = 28
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.0.3"
 
         ndk {
             // arm64 first; armeabi-v7a runs the core's ARMv7 recompiler and NEON kernels on
