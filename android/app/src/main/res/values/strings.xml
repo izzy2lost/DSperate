@@ -58,6 +58,21 @@
     <string name="library_empty_no_games">No Nintendo DS games were found in that folder.</string>
     <string name="choose_folder">Choose ROM folder</string>
     <string name="choose_other_folder">Choose another folder</string>
+    <!-- Android TV and other devices whose system folder picker is a stub: games are copied in. -->
+    <string name="add_games">Add games</string>
+    <string name="library_empty_add_games">Add your Nintendo DS games (.nds or .zip) with a file manager. NinDS keeps its own copy, so they keep working after a restart.</string>
+    <string name="add_games_no_picker">No file manager on this device can pick files for NinDS. Install one (such as CX File Explorer), or copy games into this folder and refresh:\n\n%1$s</string>
+    <string name="add_games_progress">Adding game %1$d of %2$d…</string>
+    <string name="add_games_progress_pct">Adding game %1$d of %2$d (%3$d%%)…</string>
+    <string name="add_games_done_skipped">Added %1$d; %2$d were not Nintendo DS games</string>
+    <string name="add_games_failed">Could not add the games: %1$s</string>
+    <plurals name="add_games_done">
+        <item quantity="one">Added %d game</item>
+        <item quantity="other">Added %d games</item>
+    </plurals>
+    <string name="game_remove_copy">Delete game file</string>
+    <string name="remove_copy_confirm">Delete NinDS\'s copy of %1$s? Its save and save states are kept.</string>
+    <string name="library_tip_tv">Hold OK or press Menu on a game for more options</string>
     <string name="folder_access_lost_title">ROM folder needs permission</string>
     <string name="folder_access_lost">NinDS can no longer open your ROM folder (this happens after a reinstall). Choose the folder again to play.</string>
     <string name="scanning_progress">Scanning %1$d of %2$d</string>
@@ -267,4 +282,5 @@
     <string name="mapping_unbound">Not bound</string>
     <string name="mapping_reset">Reset to defaults</string>
     <string name="mapping_reset_confirm">Put every binding back to the defaults?</string>
+    <string name="stylus_hint">Right stick: move the stylus over the bottom screen. Click the right stick (R3) to touch.</string>
 </resources>

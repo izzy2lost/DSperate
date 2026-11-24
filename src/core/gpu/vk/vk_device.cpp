@@ -361,6 +361,7 @@ std::unique_ptr<Device> Device::create(std::string* why) {
   d.internal.queue2 = d.queue2;
   d.internal.phys = d.phys;
   d.internal.qfam = d.qfam;
+  d.internal.foreign = (self->limits_.dmabuf_import || self->limits_.ahb_import) && has_foreign;
 #if defined(VK_ANDROID_external_memory_android_hardware_buffer)
   if (self->limits_.ahb_import) {
     d.internal.get_ahb_properties = gipa(d.inst, "vkGetAndroidHardwareBufferPropertiesANDROID");

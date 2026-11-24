@@ -17,6 +17,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.Process
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -50,6 +51,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.izzy2lost.ninds.databinding.ActivityEmulatorBinding
 import java.io.File
 import kotlin.math.abs
+import kotlin.math.hypot
 
 /**
  * Runs one game. Lives in the ":emu" process, which is ended when the game is closed so the
@@ -106,6 +108,20 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
             if (n != rumbleSeen) { rumbleSeen = n; if (!controls.suspended) vibrate(40) }
             handler.postDelayed(this, 16)
         }
+    }
+
+    // The stylus cursor: a pad's right stick moves it over the bottom screen (a TV has no
+    // touchscreen), and the Stylus button (R3) touches there. Kept in DS pixels.
+    private var cursorX = 128f
+    private var cursorY = 96f
+    private var rightX = 0f
+    private var rightY = 0f
+    private var stylusHeld = false
+    private var cursorShownUntil = 0L
+    private var cursorLastStep = 0L
+    private var cursorTicking = false
+    private val cursorTicker = object : Runnable {
+        override fun run() = stepCursor()
     }
 
     private val fpsTicker = object : Runnable {
@@ -247,6 +263,11 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         if (settings.isLocalWireless) {
             val status = NativeLib.nativeLanStatus()
             Toast.makeText(this, if (status.isEmpty()) getString(R.string.lan_none) else getString(R.string.lan_joined, status), Toast.LENGTH_LONG).show()
+        }
+        // Without a touchscreen, say once how to touch the bottom screen.
+        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN) && !settings.getBoolean(STYLUS_HINT, false)) {
+            settings.put(STYLUS_HINT, true)
+            Toast.makeText(this, R.string.stylus_hint, Toast.LENGTH_LONG).show()
         }
         cheevoPopups = Achievements.Popups(this, binding.root)
         handler.post(fpsTicker)
@@ -494,6 +515,8 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         if (booted) NativeLib.nativeSetPaused(paused)
         if (paused) {
             heldKeys.clear(); padMask = 0; stickMask = 0; touchMask = 0; pushButtons()
+            rightX = 0f; rightY = 0f
+            if (stylusHeld) setStylus(false)
             if (booted) { NativeLib.nativeSetFrets(0); NativeLib.nativeSetAnalog(0, 0, 0, 0, false, false) }
         }
     }
@@ -572,7 +595,9 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
 
     private fun updateControlsVisibility() {
         val padConnected = InputDevice.getDeviceIds().any { InputMapping.isGamepad(InputDevice.getDevice(it)) }
-        controls.controlsVisible = settings.touchControls && !(settings.hideWithGamepad && padConnected)
+        // No touchscreen (Android TV): on-screen buttons could never be pressed, only cover the game.
+        val touch = packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
+        controls.controlsVisible = touch && settings.touchControls && !(settings.hideWithGamepad && padConnected)
         updateLayout()
     }
 
@@ -656,6 +681,12 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
             val zr = maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS)) > 0.5f
             NativeLib.nativeSetAnalog(axis(MotionEvent.AXIS_X), axis(MotionEvent.AXIS_Y), axis(MotionEvent.AXIS_Z), axis(MotionEvent.AXIS_RZ), zl, zr)
         }
+        // The right stick is the stylus cursor, unless the nub variant of the cheat has it.
+        if (!(analogActive && full)) {
+            rightX = event.getAxisValue(MotionEvent.AXIS_Z)
+            rightY = event.getAxisValue(MotionEvent.AXIS_RZ)
+            if (hypot(rightX, rightY) > CURSOR_DEADZONE) startCursor()
+        }
         var x = hatX
         var y = hatY
         if (settings.stickAsDpad && !analogActive && abs(hatX) < 0.5f && abs(hatY) < 0.5f) {
@@ -700,8 +731,51 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
             InputAction.LID -> if (down) toggleLid()
             InputAction.SCREENSHOT -> if (down) screenshot()
             InputAction.STRUM -> if (down) NativeLib.nativeStrum()
+            InputAction.STYLUS -> setStylus(down)
             else -> Unit
         }
+    }
+
+    private fun setStylus(down: Boolean) {
+        if (down == stylusHeld) return
+        stylusHeld = down
+        controls.stylusDown = down
+        if (booted) {
+            if (down) NativeLib.nativeSetTouch(cursorX.toInt(), cursorY.toInt(), true)
+            else NativeLib.nativeSetTouch(0, 0, false)
+        }
+        cursorShownUntil = SystemClock.uptimeMillis() + CURSOR_LINGER_MS
+        startCursor()
+    }
+
+    private fun startCursor() {
+        if (cursorTicking) return
+        cursorTicking = true
+        cursorLastStep = SystemClock.uptimeMillis()
+        handler.post(cursorTicker)
+    }
+
+    /** One frame of the cursor: the stick sets its speed, so it keeps moving while held over. */
+    private fun stepCursor() {
+        val now = SystemClock.uptimeMillis()
+        val dt = (now - cursorLastStep).coerceIn(0, 50) / 1000f
+        cursorLastStep = now
+        val mag = hypot(rightX, rightY)
+        if (mag > CURSOR_DEADZONE) {
+            // Squared past the dead zone: a small push is fine aiming, a full one crosses fast.
+            val t = ((mag - CURSOR_DEADZONE) / (1f - CURSOR_DEADZONE)).coerceAtMost(1f)
+            val speed = CURSOR_SPEED * t * t / mag
+            cursorX = (cursorX + rightX * speed * dt).coerceIn(0f, 255f)
+            cursorY = (cursorY + rightY * speed * dt).coerceIn(0f, 191f)
+            cursorShownUntil = now + CURSOR_LINGER_MS
+            if (stylusHeld && booted) NativeLib.nativeSetTouch(cursorX.toInt(), cursorY.toInt(), true)
+        }
+        val shown = stylusHeld || now < cursorShownUntil
+        val c = controls.stylusCursor
+        if (!shown) controls.stylusCursor = null
+        else if (c == null || c.x != cursorX || c.y != cursorY) controls.stylusCursor = android.graphics.PointF(cursorX, cursorY)
+        cursorTicking = shown
+        if (shown) handler.postDelayed(cursorTicker, 16)
     }
 
     private fun setFastForward(on: Boolean) {
@@ -1025,6 +1099,12 @@ class EmulatorActivity : AppCompatActivity(), SurfaceHolder.Callback, InputManag
         private const val EXTRA_FILE_NAME = "com.izzy2lost.ninds.extra.FILE_NAME"
         private const val EXTRA_TITLE = "com.izzy2lost.ninds.extra.TITLE"
         private const val EXTRA_LOAD_SLOT = "com.izzy2lost.ninds.extra.LOAD_SLOT"
+
+        private const val STYLUS_HINT = "stylus_hint_shown"
+        private const val CURSOR_DEADZONE = 0.2f
+        /** DS pixels a second at full tilt: across the screen in about a second. */
+        private const val CURSOR_SPEED = 240f
+        private const val CURSOR_LINGER_MS = 2500L
 
         fun intent(context: Context, game: Game, loadSlot: Int = -1): Intent {
             val intent = Intent(context, EmulatorActivity::class.java)

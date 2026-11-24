@@ -1,7 +1,12 @@
 package com.izzy2lost.ninds
 
+import android.app.Activity.RESULT_OK
+import android.content.ActivityNotFoundException
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.result.contract.ActivityResultContract
 import android.os.Bundle
 import androidx.activity.enableEdgeToEdge
 import android.provider.DocumentsContract
@@ -16,6 +21,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.izzy2lost.ninds.databinding.ActivityLibraryBinding
 import java.util.Locale
@@ -38,6 +44,7 @@ class LibraryActivity : AppCompatActivity() {
     private var query = ""
     private var scanning = false
     private var pendingSaveGame: Game? = null
+    private var gamesFocusedOnce = false
     private val themeGeneration = NinDSApp.themeGeneration
 
     private val pickFolder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -47,6 +54,15 @@ class LibraryActivity : AppCompatActivity() {
         }
         settings.romTreeUri = uri.toString()
         rescan()
+    }
+
+    /**
+     * "Add games": files picked in whatever file manager the device has, copied into NinDS's own
+     * Games folder. For Android TV and other devices whose folder picker is a stub; a copy keeps
+     * working after a restart, where a one-off grant from a file manager would not.
+     */
+    private val importGames = registerForActivityResult(PickGames()) { uris ->
+        if (uris.isNotEmpty()) importAll(uris)
     }
 
     private val openFile = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -112,15 +128,20 @@ class LibraryActivity : AppCompatActivity() {
             insets
         }
 
+        if (!packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TOUCHSCREEN)) {
+            binding.libraryTipText.setText(R.string.library_tip_tv)
+        }
         binding.libraryTipClose.setOnClickListener {
             settings.libraryTipDismissed = true
             binding.libraryTip.visibility = View.GONE
         }
         binding.gameList.layoutManager = GridLayoutManager(this, spanCount())
         binding.gameList.adapter = adapter
+        // Only its games take focus: an empty list holding it would swallow a remote's OK.
+        binding.gameList.isFocusable = false
         binding.refresh.setOnRefreshListener { rescan() }
-        binding.chooseFolderButton.setOnClickListener { pickFolder.launch(initialFolder()) }
-        binding.openFileButton.setOnClickListener { openFile.launch(arrayOf("*/*")) }
+        binding.chooseFolderButton.setOnClickListener { chooseFolder() }
+        binding.openFileButton.setOnClickListener { if (folderPickerWorks) openFile.launch(arrayOf("*/*")) else addGames() }
 
         games = library.cached()
         render()
@@ -130,7 +151,78 @@ class LibraryActivity : AppCompatActivity() {
         }
         if (savedInstanceState == null) relaunch(intent)
         if (savedInstanceState == null && intent?.action == Intent.ACTION_VIEW) intent.data?.let(::addAndLaunch)
-        else if (settings.romTreeUri.isNotEmpty() && games.isEmpty()) rescan()
+        else if (games.isEmpty() && (settings.romTreeUri.isNotEmpty() || !folderPickerWorks)) rescan()
+    }
+
+    /**
+     * Whether the system folder picker is real. Android TV ships a stub in its place
+     * (com.android.tv.frameworkpackagestubs) that closes at once, so there the library is built
+     * with "Add games" instead.
+     */
+    private val folderPickerWorks: Boolean by lazy {
+        val r = packageManager.resolveActivity(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), 0)
+        r != null && !r.activityInfo.packageName.startsWith(STUB_PACKAGE)
+    }
+
+    private fun chooseFolder() {
+        if (!folderPickerWorks) { addGames(); return }
+        try {
+            pickFolder.launch(initialFolder())
+        } catch (_: ActivityNotFoundException) {
+            addGames()
+        }
+    }
+
+    /** Opens a file manager for picking games to copy in, or says how to get one. */
+    private fun addGames() {
+        try {
+            importGames.launch(Unit)
+        } catch (_: ActivityNotFoundException) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.add_games)
+                .setMessage(getString(R.string.add_games_no_picker, paths.games.path))
+                .setPositiveButton(android.R.string.ok, null)
+                .show()
+        }
+    }
+
+    private fun importAll(uris: List<Uri>) {
+        if (scanning) return
+        scanning = true
+        binding.refresh.isRefreshing = true
+        binding.emptyState.visibility = View.GONE
+        worker.execute {
+            var added = 0
+            var rejected = 0
+            var failed: String? = null
+            uris.forEachIndexed { i, uri ->
+                var lastPct = -1
+                val r = runCatching {
+                    library.importFile(uri) { copied, total ->
+                        val pct = if (total > 0) (copied * 100 / total).toInt() else -1
+                        if (pct != lastPct) {
+                            lastPct = pct
+                            runOnUiThread {
+                                supportActionBar?.subtitle = if (pct >= 0) getString(R.string.add_games_progress_pct, i + 1, uris.size, pct)
+                                else getString(R.string.add_games_progress, i + 1, uris.size)
+                            }
+                        }
+                    }
+                }
+                r.onSuccess { if (it != null) added++ else rejected++ }.onFailure { failed = it.message ?: it.javaClass.simpleName }
+            }
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                scanning = false
+                val msg = when {
+                    failed != null -> getString(R.string.add_games_failed, failed)
+                    rejected > 0 -> getString(R.string.add_games_done_skipped, added, rejected)
+                    else -> resources.getQuantityString(R.plurals.add_games_done, added, added)
+                }
+                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                rescan()
+            }
+        }
     }
 
     /** A game restarting to apply settings: started again once its old process has gone. */
@@ -165,6 +257,39 @@ class LibraryActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    /**
+     * A remote's Menu key on a game opens its options, as a long press does. Here rather than on
+     * the card: AppCompat takes Menu for the toolbar's overflow before any view sees it.
+     */
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        val focused = currentFocus
+        if (event.keyCode == android.view.KeyEvent.KEYCODE_MENU && focused?.parent == binding.gameList) {
+            if (event.action == android.view.KeyEvent.ACTION_UP) focused.performLongClick()
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // With a remote, start on the first game rather than the toolbar's first button.
+        if (hasFocus && !gamesFocusedOnce) focusFirstGame()
+    }
+
+    /** Focuses the first game, waiting for the grid to lay its cards out if it has not yet. */
+    private fun focusFirstGame() {
+        val list = binding.gameList
+        list.getChildAt(0)?.let { gamesFocusedOnce = it.requestFocus(); return }
+        if (games.isEmpty()) return
+        list.viewTreeObserver.addOnGlobalLayoutListener(object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                val first = list.getChildAt(0) ?: return
+                list.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                if (!gamesFocusedOnce) gamesFocusedOnce = first.requestFocus()
+            }
+        })
+    }
+
     override fun onResume() {
         super.onResume()
         // The accent or black theme changed in Settings: pick it up.
@@ -185,6 +310,9 @@ class LibraryActivity : AppCompatActivity() {
             })
         }
         updateViewItem(menu.findItem(R.id.action_view))
+        menu.findItem(R.id.action_add_games)?.isVisible = !folderPickerWorks
+        menu.findItem(R.id.action_folder)?.isVisible = folderPickerWorks
+        menu.findItem(R.id.action_open_file)?.isVisible = folderPickerWorks
         return true
     }
 
@@ -242,7 +370,8 @@ class LibraryActivity : AppCompatActivity() {
         R.id.action_refresh -> { rescan(); true }
         R.id.action_view -> { setShowCovers(!adapter.showCovers); true }
         R.id.action_download_covers -> { downloadCovers(games.map { it.gameCode }, refresh = true, quiet = false); true }
-        R.id.action_folder -> { pickFolder.launch(initialFolder()); true }
+        R.id.action_folder -> { chooseFolder(); true }
+        R.id.action_add_games -> { addGames(); true }
         R.id.action_open_file -> { openFile.launch(arrayOf("*/*")); true }
         R.id.action_settings -> { startActivity(Intent(this, SettingsActivity::class.java)); true }
         else -> super.onOptionsItemSelected(item)
@@ -253,20 +382,47 @@ class LibraryActivity : AppCompatActivity() {
             it.title.contains(query, true) || it.fileName.contains(query, true) || it.gameCode.contains(query, true) ||
                 titles[it.gameCode]?.contains(query, true) == true
         }).sortedBy { (titles[it.gameCode] ?: it.title).lowercase(Locale.ROOT) }
+        val list = binding.gameList
+        val focusedGame = currentFocus?.let { list.findContainingItemView(it) }?.let { list.getChildAdapterPosition(it) } ?: RecyclerView.NO_POSITION
         adapter.submit(shown, titles)
+        // A remote's focus stays in the grid through the refresh (else it drops to the toolbar's first button).
+        if (focusedGame != RecyclerView.NO_POSITION) list.post {
+            if (currentFocus?.let { list.findContainingItemView(it) } == null && currentFocus !is android.widget.EditText && shown.isNotEmpty()) {
+                val pos = focusedGame.coerceAtMost(shown.size - 1)
+                (list.findViewHolderForAdapterPosition(pos)?.itemView ?: list.getChildAt(0))?.requestFocus()
+            }
+        }
         autoDownloadCovers()
         val noFolder = settings.romTreeUri.isEmpty()
         binding.emptyState.visibility = if (games.isEmpty() && !scanning) View.VISIBLE else View.GONE
         binding.libraryTip.visibility = if (games.isNotEmpty() && !settings.libraryTipDismissed) View.VISIBLE else View.GONE
-        binding.emptyText.setText(if (noFolder) R.string.library_empty_no_folder else R.string.library_empty_no_games)
-        binding.chooseFolderButton.setText(if (noFolder) R.string.choose_folder else R.string.choose_other_folder)
+        if (folderPickerWorks) {
+            binding.emptyText.setText(if (noFolder) R.string.library_empty_no_folder else R.string.library_empty_no_games)
+            binding.chooseFolderButton.setText(if (noFolder) R.string.choose_folder else R.string.choose_other_folder)
+            binding.chooseFolderButton.setIconResource(R.drawable.ic_folder)
+            binding.openFileButton.visibility = View.VISIBLE
+        } else {
+            binding.emptyText.text = getString(R.string.library_empty_add_games)
+            binding.chooseFolderButton.setText(R.string.add_games)
+            binding.chooseFolderButton.setIconResource(R.drawable.ic_cartridge)
+            binding.openFileButton.visibility = View.GONE
+        }
+        // With a remote, focus has to start somewhere: on the button when the library is empty.
+        if (binding.emptyState.visibility == View.VISIBLE && currentFocus?.parent != binding.emptyState) binding.chooseFolderButton.requestFocus()
+        // ...and on the first game once there are games: the library can still be loading when the
+        // window first gets focus, and focus can be lost (the button it was on went away). Never
+        // away from the search box while typing.
+        if (shown.isNotEmpty() && currentFocus !is android.widget.EditText) {
+            if (gamesFocusedOnce && currentFocus?.isShown != true) gamesFocusedOnce = false
+            if (!gamesFocusedOnce && hasWindowFocus()) focusFirstGame()
+        }
     }
 
     private fun rescan() {
         val tree = settings.romTreeUri.takeIf { it.isNotEmpty() }?.let(Uri::parse)
-        if (tree == null) {
+        if (tree == null && folderPickerWorks && !library.hasLocalGames()) {
             binding.refresh.isRefreshing = false
-            pickFolder.launch(initialFolder())
+            chooseFolder()
             return
         }
         if (scanning) return
@@ -342,6 +498,8 @@ class LibraryActivity : AppCompatActivity() {
             .setPositiveButton(R.string.continue_yes) { _, _ -> start(game, SaveStateSlot.AUTO) }
             .setNegativeButton(R.string.continue_no) { _, _ -> launch(game) }
             .show()
+            // A remote's OK picks Continue straight away (nothing has focus otherwise).
+            .getButton(android.content.DialogInterface.BUTTON_POSITIVE)?.requestFocus()
     }
 
     private fun showGameOptions(game: Game) {
@@ -353,6 +511,7 @@ class LibraryActivity : AppCompatActivity() {
         options += R.string.game_import_save to { pendingSaveGame = game; importSave.launch(arrayOf("*/*")) }
         if (hasSave) options += R.string.game_export_save to { pendingSaveGame = game; exportSave.launch("${game.stem}.sav") }
         if (hasSave) options += R.string.game_delete_save to { confirmDeleteSave(game) }
+        if (library.isLocal(game)) options += R.string.game_remove_copy to { confirmRemoveCopy(game) }
         MaterialAlertDialogBuilder(this)
             .setTitle(adapter.titleOf(game))
             .setItems(options.map { getString(it.first) }.toTypedArray()) { _, which -> options[which].second() }
@@ -373,7 +532,54 @@ class LibraryActivity : AppCompatActivity() {
             .show()
     }
 
+    /** Deletes a game copied in with "Add games". Its save and save states stay. */
+    private fun confirmRemoveCopy(game: Game) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.game_remove_copy)
+            .setMessage(getString(R.string.remove_copy_confirm, adapter.titleOf(game)))
+            .setPositiveButton(R.string.delete) { _, _ ->
+                if (library.deleteLocal(game)) {
+                    games = library.cached()
+                    render()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * GET_CONTENT for several files, with Android TV's stub picker left out of the chooser (it
+     * would only close again). GET_CONTENT rather than OPEN_DOCUMENT: TV file managers (CX File
+     * Explorer, MT Manager) answer it, and the grant need not outlive the copy.
+     */
+    private class PickGames : ActivityResultContract<Unit, List<Uri>>() {
+        override fun createIntent(context: Context, input: Unit): Intent {
+            val get = Intent(Intent.ACTION_GET_CONTENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*")
+                .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            @Suppress("DEPRECATION")
+            val handlers = context.packageManager.queryIntentActivities(get, 0)
+            val real = handlers.filterNot { it.activityInfo.packageName.startsWith(STUB_PACKAGE) }
+            if (real.isEmpty()) throw ActivityNotFoundException("no file picker")
+            if (real.size == 1) return get.setClassName(real[0].activityInfo.packageName, real[0].activityInfo.name)
+            val stubs = handlers.filter { it.activityInfo.packageName.startsWith(STUB_PACKAGE) }
+                .map { ComponentName(it.activityInfo.packageName, it.activityInfo.name) }
+            return Intent.createChooser(get, context.getString(R.string.add_games))
+                .putExtra(Intent.EXTRA_EXCLUDE_COMPONENTS, stubs.toTypedArray())
+        }
+
+        override fun parseResult(resultCode: Int, intent: Intent?): List<Uri> {
+            if (resultCode != RESULT_OK || intent == null) return emptyList()
+            val clip = intent.clipData
+            if (clip != null && clip.itemCount > 0) return List(clip.itemCount) { clip.getItemAt(it).uri }.filterNotNull()
+            return listOfNotNull(intent.data)
+        }
+    }
+
     companion object {
         const val EXTRA_RELAUNCH = "com.izzy2lost.ninds.extra.RELAUNCH"
+        /** Android TV's stand-ins for DocumentsUI, which only close again. */
+        private const val STUB_PACKAGE = "com.android.tv.frameworkpackagestubs"
     }
 }

@@ -1491,6 +1491,10 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     if (d.zero_copy) {
       // The record into this slot's AHardwareBuffer, word for word (R32UI and RGBA8 are size-compatible).
       const VkImageSubresourceRange all{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+      // The buffer belongs to the presenter's API between frames: taken back for the copy, handed over after it.
+      // Without the hand-over the Mali-G52 on a MediaTek TV (32-bit Android) kept the image in its own layout and
+      // OpenGL ES sampled zeros: a black 3D layer above 1x. (Its contents are not kept: the old layout is UNDEFINED.)
+      const u32 other = d.vk->foreign ? VK_QUEUE_FAMILY_FOREIGN_EXT : VK_QUEUE_FAMILY_EXTERNAL;
       VkImageMemoryBarrier to_dst{}; to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER; to_dst.image = d.ahb_img[slot]; to_dst.subresourceRange = all;
       to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
       to_dst.srcQueueFamilyIndex = to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1499,8 +1503,8 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
       a.vkCmdCopyImage(cb, d.res[slot].img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, d.ahb_img[slot], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ic);
       VkImageMemoryBarrier after{}; after.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER; after.image = d.ahb_img[slot]; after.subresourceRange = all;
       after.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; after.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-      after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-      after.srcQueueFamilyIndex = after.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; after.dstAccessMask = 0;
+      after.srcQueueFamilyIndex = d.vk->qfam; after.dstQueueFamilyIndex = other;
       a.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &after);
     }
     // The 1x record: the image to its lasting layout first, then the texel under each DS pixel's centre into rec1 (lean_down.frag).

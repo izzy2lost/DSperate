@@ -29,6 +29,7 @@ class TouchControlsView(context: Context) : View(context) {
 
     var controlsVisible = true
         set(value) { field = value; releaseAll(); invalidate() }
+    private val hasTouch = context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TOUCHSCREEN)
     var opacity = 0.55f
         set(value) { field = value; invalidate() }
     var scale = 1f
@@ -52,6 +53,12 @@ class TouchControlsView(context: Context) : View(context) {
     /** Every DS screen shown, cut out of the console shell. */
     var screenRects: List<Rect> = emptyList()
         set(value) { field = value; invalidate() }
+    /** The stylus cursor (moved by a pad's right stick), in DS bottom-screen pixels; null: hidden. */
+    var stylusCursor: android.graphics.PointF? = null
+        set(value) { field = value; invalidate() }
+    var stylusDown = false
+        set(value) { field = value; invalidate() }
+
     /** Portrait keeps the controls in this band at the bottom (the screens sit above it). */
     var portraitBandTop = 0
 
@@ -173,9 +180,34 @@ class TouchControlsView(context: Context) : View(context) {
     private fun shellShown() = skin.shell != null && controlsVisible && (preview || height > width)
 
     override fun onDraw(canvas: Canvas) {
+        drawControls(canvas)
+        drawStylusCursor(canvas)
+    }
+
+    private fun drawStylusCursor(canvas: Canvas) {
+        val c = stylusCursor ?: return
+        val r = touchScreenRect ?: return
+        val x = r.left + (c.x + 0.5f) * r.width() / 256f
+        val y = r.top + (c.y + 0.5f) * r.height() / 192f
+        val radius = maxOf(7 * density, r.width() / 256f * 5)
+        // A white ring with a dark edge reads on any game; it fills while touching.
+        fill.color = Color.argb(if (stylusDown) 200 else 60, 255, 255, 255)
+        canvas.drawCircle(x, y, radius, fill)
+        stroke.clearShadowLayer()
+        stroke.strokeWidth = 4 * density
+        stroke.color = Color.argb(160, 0, 0, 0)
+        canvas.drawCircle(x, y, radius, stroke)
+        stroke.strokeWidth = 2 * density
+        stroke.color = Color.WHITE
+        canvas.drawCircle(x, y, radius, stroke)
+        fill.color = if (stylusDown) Color.BLACK else Color.WHITE
+        canvas.drawCircle(x, y, 1.5f * density, fill)
+    }
+
+    private fun drawControls(canvas: Canvas) {
         if (!controlsVisible) {
-            // The menu stays reachable with the controls hidden.
-            drawButton(canvas, buttons.first { it.id == "menu" }, 0.35f)
+            // The menu stays reachable with the controls hidden (on a touchscreen; a TV has Back).
+            if (hasTouch) drawButton(canvas, buttons.first { it.id == "menu" }, 0.35f)
             return
         }
         val shell = shellShown()

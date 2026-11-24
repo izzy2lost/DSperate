@@ -19,9 +19,14 @@ class AppPaths(context: Context) {
     val cheatDatabase = File(root, "usrcheat.dat")
     /** Imported GBA games for slot 2, their saves beside them (<name>.sav). */
     val gba = File(root, "gba")
+    /**
+     * DS games copied into NinDS ("Add games", for devices such as Android TV whose system folder
+     * picker is a stub). Always part of the library, beside the chosen ROM folder.
+     */
+    val games = File(root, "Games")
 
     init {
-        listOf(saves, states, cheats, bios, icons, gba).forEach { it.mkdirs() }
+        listOf(saves, states, cheats, bios, icons, gba, games).forEach { it.mkdirs() }
     }
 
     fun savFile(stem: String) = File(saves, "$stem.sav")

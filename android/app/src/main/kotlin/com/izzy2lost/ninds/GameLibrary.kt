@@ -66,10 +66,14 @@ class GameLibrary(private val context: Context) {
 
     private data class Doc(val uri: Uri, val name: String, val size: Long, val modified: Long)
 
-    /** Walks the tree and reads new or changed banners. Call off the main thread. */
-    fun scan(tree: Uri, progress: (done: Int, total: Int) -> Unit = { _, _ -> }): List<Game> {
+    /**
+     * Walks the ROM folder (when there is one) and NinDS's own Games folder, and reads new or
+     * changed banners. Call off the main thread.
+     */
+    fun scan(tree: Uri?, progress: (done: Int, total: Int) -> Unit = { _, _ -> }): List<Game> {
         val docs = mutableListOf<Doc>()
-        walk(tree, DocumentsContract.getTreeDocumentId(tree), docs, 0)
+        if (tree != null) walk(tree, DocumentsContract.getTreeDocumentId(tree), docs, 0)
+        walkLocal(paths.games, docs, 0)
         val previous = cached().associateBy { it.uri }
         val games = mutableListOf<Game>()
         docs.forEachIndexed { i, doc ->
@@ -105,6 +109,81 @@ class GameLibrary(private val context: Context) {
         games.sortBy { it.title.lowercase(Locale.ROOT) }
         store(games)
         return game
+    }
+
+    /** True when NinDS's own Games folder holds anything that looks like a game. */
+    fun hasLocalGames(): Boolean = mutableListOf<Doc>().also { walkLocal(paths.games, it, 0) }.isNotEmpty()
+
+    /** Whether [game] is a copy in NinDS's own Games folder (so removing it frees the space). */
+    fun isLocal(game: Game): Boolean = localFile(game) != null
+
+    /** Deletes a copied game's file and drops it from the cache. */
+    fun deleteLocal(game: Game): Boolean {
+        val f = localFile(game) ?: return false
+        if (!f.delete()) return false
+        store(cached().filter { it.uri != game.uri })
+        return true
+    }
+
+    private fun localFile(game: Game): File? {
+        val uri = Uri.parse(game.uri)
+        if (uri.scheme != "file") return null
+        val f = File(uri.path ?: return null)
+        return f.takeIf { it.canonicalPath.startsWith(paths.games.canonicalPath + File.separator) }
+    }
+
+    /**
+     * Copies one picked file into the Games folder, under its own name (numbered when the name is
+     * taken by a different file). Returns null when it is not a DS game; the copy is then removed.
+     * Call off the main thread.
+     */
+    fun importFile(uri: Uri, progress: (copied: Long, total: Long) -> Unit = { _, _ -> }): File? {
+        val resolver = context.contentResolver
+        val (name, size) = resolver.query(
+            uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME, android.provider.OpenableColumns.SIZE), null, null, null,
+        )?.use { c -> if (c.moveToFirst()) (c.getString(0) ?: "game.nds") to (if (c.isNull(1)) -1L else c.getLong(1)) else null }
+            ?: (uri.lastPathSegment?.substringAfterLast('/') ?: "game.nds") to -1L
+        val safe = name.replace(Regex("""[\\/:*?"<>|]"""), "_").trim().ifBlank { "game.nds" }
+        if (safe.substringAfterLast('.', "").lowercase(Locale.ROOT) !in EXTENSIONS) return null
+        // The same file picked again replaces nothing and copies nothing.
+        File(paths.games, safe).takeIf { it.isFile && size >= 0 && it.length() == size }?.let { return it }
+        var target = File(paths.games, safe)
+        var n = 2
+        while (target.exists()) target = File(paths.games, "${safe.substringBeforeLast('.')} ($n).${safe.substringAfterLast('.')}").also { n++ }
+        val part = File(paths.games, ".${target.name}.part")
+        try {
+            resolver.openInputStream(uri)!!.use { input ->
+                part.outputStream().use { out ->
+                    val buf = ByteArray(1 shl 20)
+                    var copied = 0L
+                    while (true) {
+                        val r = input.read(buf)
+                        if (r < 0) break
+                        out.write(buf, 0, r)
+                        copied += r
+                        progress(copied, size)
+                    }
+                    out.fd.sync()
+                }
+            }
+            val doc = Doc(Uri.fromFile(part), target.name, part.length(), part.lastModified())
+            val isGame = runCatching { readGame(doc) }.getOrNull() != null
+            if (!isGame || !part.renameTo(target)) { part.delete(); return null }
+            return target
+        } catch (e: Exception) {
+            part.delete()
+            throw e
+        }
+    }
+
+    private fun walkLocal(dir: File, out: MutableList<Doc>, depth: Int) {
+        if (depth > 8) return
+        for (f in dir.listFiles().orEmpty()) {
+            if (f.name.startsWith(".")) continue
+            if (f.isDirectory) { walkLocal(f, out, depth + 1); continue }
+            if (f.name.substringAfterLast('.', "").lowercase(Locale.ROOT) !in EXTENSIONS) continue
+            out += Doc(Uri.fromFile(f), f.name, f.length(), f.lastModified())
+        }
     }
 
     private fun walk(tree: Uri, docId: String, out: MutableList<Doc>, depth: Int) {

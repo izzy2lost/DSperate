@@ -26,6 +26,8 @@ enum class InputAction(val label: String, val dsBit: Int = -1, val fret: Int = -
     MICROPHONE("Blow into microphone"),
     LID("Close / open lid"),
     SCREENSHOT("Screenshot"),
+    // Touches the bottom screen where the right stick has put the stylus cursor (for a TV).
+    STYLUS("Touch at stylus cursor"),
     // The Guitar Grip (Guitar Hero: On Tour, Band Hero). Only while it is in the GBA slot,
     // when these win over whatever else the same key does.
     GRIP_GREEN("Guitar Grip: green fret", fret = 0),
@@ -58,6 +60,14 @@ class InputMapping(private val settings: Settings) {
             val keys = if (stored == "\u0000") DEFAULTS[action].orEmpty().toMutableSet()
             else stored.split(',').mapNotNull { it.trim().toIntOrNull() }.toMutableSet()
             bindings[action] = keys
+        }
+        // A key someone bound by hand stays theirs: a newer action's default does not take it.
+        for (action in InputAction.entries) {
+            if (settings.getString(action.settingsKey, "\u0000") != "\u0000") continue
+            for (other in InputAction.entries) {
+                if (other == action || other.isGrip != action.isGrip) continue
+                if (settings.getString(other.settingsKey, "\u0000") != "\u0000") bindings[action]!!.removeAll(bindings[other]!!)
+            }
         }
         rebuild()
     }
@@ -118,9 +128,10 @@ class InputMapping(private val settings: Settings) {
             InputAction.CYCLE_LAYOUT to setOf(KeyEvent.KEYCODE_BUTTON_THUMBL, KeyEvent.KEYCODE_F2),
             InputAction.QUICK_SAVE to setOf(KeyEvent.KEYCODE_F5),
             InputAction.QUICK_LOAD to setOf(KeyEvent.KEYCODE_F7),
-            InputAction.MICROPHONE to setOf(KeyEvent.KEYCODE_BUTTON_THUMBR, KeyEvent.KEYCODE_M),
+            InputAction.MICROPHONE to setOf(KeyEvent.KEYCODE_M),
             InputAction.LID to setOf(KeyEvent.KEYCODE_F3),
             InputAction.SCREENSHOT to setOf(KeyEvent.KEYCODE_F12),
+            InputAction.STYLUS to setOf(KeyEvent.KEYCODE_BUTTON_THUMBR),
             // As the desktop frontend: frets on the shoulders and triggers, strum on the d-pad.
             InputAction.GRIP_GREEN to setOf(KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_1),
             InputAction.GRIP_RED to setOf(KeyEvent.KEYCODE_BUTTON_L2, KeyEvent.KEYCODE_2),

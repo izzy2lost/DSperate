@@ -74,6 +74,10 @@ struct DeviceInternal {
   VkQueue          queue2 = VK_NULL_HANDLE;   // the 3D raster's own queue (null: one queue, shared under queue_mutex)
   VkPhysicalDevice phys = VK_NULL_HANDLE;
   u32              qfam = 0;
+  // VK_EXT_queue_family_foreign is enabled: images shared with another API (an
+  // AHardwareBuffer the OpenGL ES presenter samples) are released to
+  // VK_QUEUE_FAMILY_FOREIGN_EXT, else to VK_QUEUE_FAMILY_EXTERNAL.
+  bool             foreign = false;
   VkDeviceSize     non_coherent_atom = 1;
   // vkGetAndroidHardwareBufferPropertiesANDROID where Limits::ahb_import, else null.
   PFN_vkVoidFunction get_ahb_properties = nullptr;

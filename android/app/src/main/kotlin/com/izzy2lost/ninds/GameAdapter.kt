@@ -8,7 +8,10 @@ import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
 import android.util.LruCache
+import android.view.KeyEvent
 import android.view.LayoutInflater
+import com.google.android.material.card.MaterialCardView
+import com.google.android.material.color.MaterialColors
 import android.view.ViewGroup
 import android.widget.ImageView
 import androidx.appcompat.widget.AppCompatImageView
@@ -55,6 +58,15 @@ class GameAdapter(
         notifyDataSetChanged()
     }
 
+    // Stable ids keep the same card (and a remote's focus on it) through a refresh.
+    init { setHasStableIds(true) }
+
+    override fun getItemId(position: Int): Long {
+        var h = -0x340d631b7bdddcdbL   // FNV-1a, 64-bit, of the game's location
+        for (c in items[position].uri) { h = (h xor c.code.toLong()) * 0x100000001b3L }
+        return h
+    }
+
     override fun getItemCount() = items.size
 
     override fun getItemViewType(position: Int) = if (showCovers) 1 else 0
@@ -88,6 +100,24 @@ class GameAdapter(
         }
         holder.itemView.setOnClickListener { onClick(game) }
         holder.itemView.setOnLongClickListener { onLongClick(game); true }
+        // A pad's Y opens the game's options, as a long press does (a remote's Menu: LibraryActivity).
+        holder.itemView.setOnKeyListener { _, keyCode, event ->
+            val menu = keyCode == KeyEvent.KEYCODE_BUTTON_Y
+            if (menu && event.action == KeyEvent.ACTION_UP) onLongClick(game)
+            menu
+        }
+        // The card under the D-pad stands out (Material's own focus tint is too faint for a TV).
+        val card = holder.itemView as MaterialCardView
+        fun showFocus(focused: Boolean) {
+            card.strokeWidth = if (focused) (3 * card.resources.displayMetrics.density).toInt() else 0
+            card.animate().scaleX(if (focused) 1.06f else 1f).scaleY(if (focused) 1.06f else 1f).setDuration(120).start()
+        }
+        card.strokeColor = MaterialColors.getColor(card, androidx.appcompat.R.attr.colorPrimary)
+        card.setOnFocusChangeListener { _, focused -> showFocus(focused) }
+        card.strokeWidth = 0
+        card.scaleX = if (card.isFocused) 1.06f else 1f
+        card.scaleY = card.scaleX
+        if (card.isFocused) showFocus(true)
     }
 
     private val loader = CoverLoader(covers)
